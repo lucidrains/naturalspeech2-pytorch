@@ -1,0 +1,1 @@
+from naturalspeech2_pytorch.naturalspeech2_pytorch import NaturalSpeech2
