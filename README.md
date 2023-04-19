@@ -1,3 +1,5 @@
+<img src="./naturalspeech2.png" width="450px"></img>
+
 ## Natural Speech 2 - Pytorch (wip)
 
 Implementation of <a href="https://arxiv.org/abs/2304.09116">Natural Speech 2</a>, Zero-shot Speech and Singing Synthesizer, in Pytorch
