@@ -4,6 +4,10 @@ Implementation of <a href="https://arxiv.org/abs/2304.09116">Natural Speech 2</a
 
 They simply apply latent diffusion to residual vector quantized latents for these results.
 
+## Appreciation
+
+- Stability.ai and 🤗 Huggingface for the generous sponsorship to work and open source cutting edge artificial intelligence research
+
 ## Citations
 
 ```bibtex
