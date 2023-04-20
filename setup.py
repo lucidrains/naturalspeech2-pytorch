@@ -20,6 +20,7 @@ setup(
     'audiolm-pytorch',
     'einops>=0.4',
     'torch>=1.6',
+    'vector-quantize-pytorch>=1.1.6'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',
