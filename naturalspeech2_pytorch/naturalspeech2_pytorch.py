@@ -18,7 +18,7 @@ from audiolm_pytorch import SoundStream, EncodecWrapper
 from audiolm_pytorch.data import SoundDataset, get_dataloader
 
 from beartype import beartype
-from beartype.typing import Tuple, Union
+from beartype.typing import Tuple, Union, Optional
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
@@ -192,7 +192,7 @@ class NaturalSpeech2(nn.Module):
     def __init__(
         self,
         model: Transformer,
-        codec: Union[SoundStream, EncodecWrapper],
+        codec: Optional[Union[SoundStream, EncodecWrapper]] = None,
         *,
         timesteps = 1000,
         use_ddim = True,
@@ -207,7 +207,9 @@ class NaturalSpeech2(nn.Module):
     ):
         super().__init__()
         self.model = model
-        self.dim = codec.codebook_dim
+
+        self.codec = codec
+        self.dim = codec.codebook_dim if exists(codec) else None
 
         assert objective in {'x0', 'eps', 'v'}, 'objective must be either predict x0 or noise'
         self.objective = objective
@@ -389,7 +391,15 @@ class NaturalSpeech2(nn.Module):
         batch_size = 1
     ):
         sample_fn = self.ddpm_sample if not self.use_ddim else self.ddim_sample
-        return sample_fn((batch_size, length, self.dim))
+        audio = sample_fn((batch_size, length, self.dim))
+
+        if exists(self.codec):
+            audio = self.codec.decode(audio)
+
+            if audio.ndim == 3:
+                audio = rearrange(audio, 'b 1 n -> b n')
+
+        return audio
 
     def forward(
         self,
@@ -397,9 +407,18 @@ class NaturalSpeech2(nn.Module):
         *args,
         **kwargs
     ):
+        is_raw_audio = audio.ndim == 2
+
+        assert not (is_raw_audio and not exists(self.codec)), 'codec must be passed in if one were to train on raw audio'
+
+        if is_raw_audio:
+            with torch.no_grad():
+                self.codec.eval()
+                audio, *_ = self.codec(audio, return_encoded = True)
+
         batch, n, d, device = *audio.shape, self.device
 
-        assert d == self.dim, f'codec codebook dimension {d} must match model dimensions {self.dim}'
+        assert not exists(self.dim) or d == self.dim, f'codec codebook dimension {d} must match model dimensions {self.dim}'
 
         # sample random times
 
