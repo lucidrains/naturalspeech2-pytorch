@@ -10,6 +10,8 @@ They simply apply latent diffusion to residual vector quantized latents for thes
 
 - <a href="https://stability.ai/">Stability</a> and <a href="https://huggingface.co/">🤗 Huggingface</a> for their generous sponsorships to work on and open source cutting edge artificial intelligence research
 
+- <a href="https://huggingface.co/">🤗 Huggingface</a> for the amazing accelerate library
+
 ## Citations
 
 ```bibtex

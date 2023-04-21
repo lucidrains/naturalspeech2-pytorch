@@ -17,6 +17,7 @@ setup(
     'speech synthesis'
   ],
   install_requires=[
+    'accelerate',
     'audiolm-pytorch>=0.27.1',
     'einops>=0.4',
     'torch>=1.6',
