@@ -64,6 +64,7 @@ class Transformer(nn.Module):
         ff_mult = 4
     ):
         super().__init__()
+        self.dim = dim
         self.layers = mlist([])
 
         for _ in range(depth):
@@ -207,9 +208,11 @@ class NaturalSpeech2(nn.Module):
     ):
         super().__init__()
         self.model = model
-
         self.codec = codec
-        self.dim = codec.codebook_dim if exists(codec) else None
+
+        assert not exists(codec) or model.dim == codec.codebook_dim, 'transformer model dimension must be equal to codec dimension'
+
+        self.dim = codec.codebook_dim if exists(codec) else model.dim
 
         assert objective in {'x0', 'eps', 'v'}, 'objective must be either predict x0 or noise'
         self.objective = objective
@@ -418,7 +421,7 @@ class NaturalSpeech2(nn.Module):
 
         batch, n, d, device = *audio.shape, self.device
 
-        assert not exists(self.dim) or d == self.dim, f'codec codebook dimension {d} must match model dimensions {self.dim}'
+        assert d == self.dim, f'codec codebook dimension {d} must match model dimensions {self.dim}'
 
         # sample random times
 
