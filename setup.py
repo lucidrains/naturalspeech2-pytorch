@@ -17,7 +17,7 @@ setup(
     'speech synthesis'
   ],
   install_requires=[
-    'audiolm-pytorch',
+    'audiolm-pytorch>=0.27.1',
     'einops>=0.4',
     'torch>=1.6',
     'vector-quantize-pytorch>=1.1.6'
