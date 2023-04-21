@@ -19,8 +19,11 @@ setup(
   install_requires=[
     'accelerate',
     'audiolm-pytorch>=0.27.2',
+    'beartype',
     'einops>=0.4',
+    'ema-pytorch',
     'torch>=1.6',
+    'tqdm',
     'vector-quantize-pytorch>=1.1.6'
   ],
   classifiers=[
