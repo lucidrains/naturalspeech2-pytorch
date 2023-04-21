@@ -18,7 +18,7 @@ setup(
   ],
   install_requires=[
     'accelerate',
-    'audiolm-pytorch>=0.27.1',
+    'audiolm-pytorch>=0.27.2',
     'einops>=0.4',
     'torch>=1.6',
     'vector-quantize-pytorch>=1.1.6'
