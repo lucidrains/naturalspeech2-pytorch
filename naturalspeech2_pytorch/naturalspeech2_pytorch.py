@@ -29,6 +29,9 @@ from tqdm.auto import tqdm
 
 mlist = nn.ModuleList
 
+def Sequential(*mods):
+    return nn.Sequential(*filter(exists, mods))
+
 # helpers functions
 
 def exists(x):
@@ -42,7 +45,127 @@ def default(val, d):
 def identity(t, *args, **kwargs):
     return t
 
-# model, which is ~transformer
+# model, which is wavenet + transformer
+
+class CausalConv1d(nn.Conv1d):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        kernel_size, = self.kernel_size
+        dilation, = self.dilation
+        stride, = self.stride
+
+        assert stride == 1
+        self.causal_padding = dilation * (kernel_size - 1)
+
+    def forward(self, x):
+        causal_padded_x = F.pad(x, (self.causal_padding, 0), value = 0.)
+        return super().forward(causal_padded_x)
+
+class WavenetResBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        dilation,
+        kernel_size = 3,
+        skip_conv = False
+    ):
+        super().__init__()
+        self.conv = CausalConv1d(dim, dim, kernel_size, dilation = dilation)
+        self.res_conv = CausalConv1d(dim, dim, 1)
+        self.skip_conv = CausalConv1d(dim, dim, 1) if skip_conv else None
+
+    def forward(self, x):
+        res = self.res_conv(x)
+
+        x = self.conv(x)
+        x = x.tanh() * x.sigmoid()
+
+        x = x + res
+
+        skip = None
+        if exists(self.skip_conv):
+            skip = self.skip_conv(x)
+
+        return x, skip
+
+
+class WavenetStack(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        layers,
+        kernel_size = 3,
+        has_skip = False
+    ):
+        super().__init__()
+        dilations = 2 ** torch.arange(layers)
+
+        self.has_skip = has_skip
+        self.blocks = mlist([])
+
+        for dilation in dilations.tolist():
+            block = WavenetResBlock(
+                dim = dim,
+                kernel_size = kernel_size,
+                dilation = dilation,
+                skip_conv = has_skip
+            )
+
+            self.blocks.append(block)
+
+    def forward(self, x):
+        residuals = []
+        skips = []
+
+        if isinstance(x, torch.Tensor):
+            x = (x,) * len(self.blocks)
+
+        for block_input, block in zip(x, self.blocks):
+            residual, skip = block(block_input)
+
+            residuals.append(residual)
+            skips.append(skip)
+
+        if self.has_skip:
+            return torch.stack(skips)
+
+        return residuals
+
+class Wavenet(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        init_conv_kernel = 3,
+        stacks,
+        layers
+    ):
+        super().__init__()
+        self.init_conv = CausalConv1d(dim, dim, init_conv_kernel)
+        self.stacks = mlist([])
+
+        for ind in range(stacks):
+            is_last = ind == (stacks - 1)
+
+            stack = WavenetStack(
+                dim,
+                layers = layers,
+                has_skip = is_last
+            )
+
+            self.stacks.append(stack)
+
+        self.final_conv = CausalConv1d(dim, dim, 1)
+
+    def forward(self, x):
+        x = self.init_conv(x)
+
+        for stack in self.stacks:
+            x = stack(x)
+
+        return self.final_conv(x.sum(dim = 0))
 
 class RMSNorm(nn.Module):
     def __init__(self, dim):
@@ -61,7 +184,8 @@ class Transformer(nn.Module):
         depth,
         dim_head = 64,
         heads = 8,
-        ff_mult = 4
+        ff_mult = 4,
+        ff_causal_conv = False
     ):
         super().__init__()
         self.dim = dim
@@ -70,7 +194,7 @@ class Transformer(nn.Module):
         for _ in range(depth):
             self.layers.append(mlist([
                 Attention(dim = dim, dim_head = dim_head, heads = heads),
-                FeedForward(dim = dim, mult = ff_mult)
+                FeedForward(dim = dim, mult = ff_mult, causal_conv = ff_causal_conv)
             ]))
 
         self.to_pred = nn.Sequential(
@@ -89,6 +213,42 @@ class Transformer(nn.Module):
 
         return self.to_pred(x)
 
+class Model(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        depth,
+        dim_head = 64,
+        heads = 8,
+        ff_mult = 4,
+        wavenet_layers = 8,
+        wavenet_stacks = 4
+    ):
+        super().__init__()
+        self.wavenet = Wavenet(
+            dim = dim,
+            stacks = wavenet_stacks,
+            layers = wavenet_layers
+        )
+
+        self.transformer = Transformer(
+            dim = dim,
+            depth = depth,
+            dim_head = dim_head,
+            heads = heads,
+            ff_mult = ff_mult,
+            ff_causal_conv = True
+        )
+
+    def forward(self, x):
+        x = rearrange(x, 'b n d -> b d n')
+        x = self.wavenet(x)
+        x = rearrange(x, 'b d n -> b n d')
+
+        x = self.transformer(x)
+        return x
+
 # feedforward
 
 class GEGLU(nn.Module):
@@ -96,12 +256,22 @@ class GEGLU(nn.Module):
         x, gate = x.chunk(2, dim = -1)
         return F.gelu(gate) * x
 
-def FeedForward(dim, mult = 4):
+def FeedForward(dim, mult = 4, causal_conv = False):
     dim_inner = int(dim * mult * 2 / 3)
-    return nn.Sequential(
+
+    conv = None
+    if causal_conv:
+        conv = nn.Sequential(
+            Rearrange('b n d -> b d n'),
+            CausalConv1d(dim_inner, dim_inner, 3),
+            Rearrange('b d n -> b n d'),
+        )
+
+    return Sequential(
         RMSNorm(dim),
         nn.Linear(dim, dim_inner * 2),
         GEGLU(),
+        conv,
         nn.Linear(dim_inner, dim)
     )
 
@@ -192,7 +362,7 @@ class NaturalSpeech2(nn.Module):
     @beartype
     def __init__(
         self,
-        model: Transformer,
+        model: Model,
         codec: Optional[Union[SoundStream, EncodecWrapper]] = None,
         *,
         timesteps = 1000,
@@ -634,9 +804,9 @@ class Trainer(object):
                             milestone = self.step // self.save_and_sample_every
                             batches = num_to_groups(self.num_samples, self.batch_size)
                             all_samples_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
-                        #
+
                         all_samples = torch.cat(all_samples_list, dim = 0)
-                        #
+
                         torch.save(all_samples, str(self.results_folder / f'sample-{milestone}.png'))
                         self.save(milestone)
 
