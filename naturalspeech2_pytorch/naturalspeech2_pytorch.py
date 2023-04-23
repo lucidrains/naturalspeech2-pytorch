@@ -20,6 +20,8 @@ from audiolm_pytorch.data import SoundDataset, get_dataloader
 from beartype import beartype
 from beartype.typing import Tuple, Union, Optional
 
+from naturalspeech2_pytorch.attend import Attend
+
 from accelerate import Accelerator
 from ema_pytorch import EMA
 
@@ -227,7 +229,8 @@ class Transformer(nn.Module):
         heads = 8,
         ff_mult = 4,
         ff_causal_conv = False,
-        dim_time_mult = None
+        dim_time_mult = None,
+        use_flash = False
     ):
         super().__init__()
         self.dim = dim
@@ -244,7 +247,7 @@ class Transformer(nn.Module):
         for _ in range(depth):
             self.layers.append(mlist([
                 RMSNorm(dim, scale = not cond_time),
-                Attention(dim = dim, dim_head = dim_head, heads = heads),
+                Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash = use_flash),
                 RMSNorm(dim, scale = not cond_time),
                 FeedForward(dim = dim, mult = ff_mult, causal_conv = ff_causal_conv)
             ]))
@@ -295,7 +298,8 @@ class Model(nn.Module):
         ff_mult = 4,
         wavenet_layers = 8,
         wavenet_stacks = 4,
-        dim_time_mult = 4
+        dim_time_mult = 4,
+        use_flash_attn = True
     ):
         super().__init__()
         self.dim = dim
@@ -328,7 +332,8 @@ class Model(nn.Module):
             heads = heads,
             ff_mult = ff_mult,
             ff_causal_conv = True,
-            dim_time_mult = dim_time_mult
+            dim_time_mult = dim_time_mult,
+            use_flash = use_flash_attn,
         )
 
     def forward(
@@ -377,8 +382,11 @@ class Attention(nn.Module):
         self,
         dim,
         *,
+        causal = False,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        dropout = 0.,
+        use_flash = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -386,6 +394,7 @@ class Attention(nn.Module):
 
         dim_inner = dim_head * heads
 
+        self.attend = Attend(causal = causal, dropout = dropout, use_flash = use_flash)
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
 
