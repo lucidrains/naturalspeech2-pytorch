@@ -6,6 +6,12 @@ Implementation of <a href="https://arxiv.org/abs/2304.09116">Natural Speech 2</a
 
 They simply apply latent diffusion to residual vector quantized latents for these results.
 
+## Appreciation
+
+- <a href="https://stability.ai/">Stability</a> and <a href="https://huggingface.co/">🤗 Huggingface</a> for their generous sponsorships to work on and open source cutting edge artificial intelligence research
+
+- <a href="https://huggingface.co/">🤗 Huggingface</a> for the amazing accelerate library
+
 ## Install
 
 ```bash
@@ -53,12 +59,6 @@ generated_audio = diffusion.sample(length = 1024) # (1, 327680)
 
 ```
 
-## Appreciation
-
-- <a href="https://stability.ai/">Stability</a> and <a href="https://huggingface.co/">🤗 Huggingface</a> for their generous sponsorships to work on and open source cutting edge artificial intelligence research
-
-- <a href="https://huggingface.co/">🤗 Huggingface</a> for the amazing accelerate library
-
 ## Citations
 
 ```bibtex
@@ -70,10 +70,37 @@ generated_audio = diffusion.sample(length = 1024) # (1, 327680)
 ```
 
 ```bibtex
+@misc{shazeer2020glu,
+    title   = {GLU Variants Improve Transformer},
+    author  = {Noam Shazeer},
+    year    = {2020},
+    url     = {https://arxiv.org/abs/2002.05202}
+}
+```
+
+```bibtex
 @inproceedings{dao2022flashattention,
     title   = {Flash{A}ttention: Fast and Memory-Efficient Exact Attention with {IO}-Awareness},
     author  = {Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and R{\'e}, Christopher},
     booktitle = {Advances in Neural Information Processing Systems},
     year    = {2022}
+}
+```
+
+```bibtex
+@article{Salimans2022ProgressiveDF,
+    title   = {Progressive Distillation for Fast Sampling of Diffusion Models},
+    author  = {Tim Salimans and Jonathan Ho},
+    journal = {ArXiv},
+    year    = {2022},
+    volume  = {abs/2202.00512}
+}
+```
+
+```bibtex
+@inproceedings{Hang2023EfficientDT,
+    title   = {Efficient Diffusion Training via Min-SNR Weighting Strategy},
+    author  = {Tiankai Hang and Shuyang Gu and Chen Li and Jianmin Bao and Dong Chen and Han Hu and Xin Geng and Baining Guo},
+    year    = {2023}
 }
 ```
