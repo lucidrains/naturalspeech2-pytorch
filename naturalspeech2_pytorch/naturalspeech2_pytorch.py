@@ -475,7 +475,8 @@ class NaturalSpeech2(nn.Module):
         min_snr_loss_weight = True,
         min_snr_gamma = 5,
         train_prob_self_cond = 0.9,
-        scale = 1.                      # this will be set to < 1. for better convergence when training on higher resolution images
+        rvq_cross_entropy_loss_weight = 0.,    # default this to off until we are sure it is working. not totally sold that this is critical
+        scale = 1.                             # this will be set to < 1. for better convergence when training on higher resolution images
     ):
         super().__init__()
         self.model = model
@@ -522,6 +523,10 @@ class NaturalSpeech2(nn.Module):
 
         self.min_snr_loss_weight = min_snr_loss_weight
         self.min_snr_gamma = min_snr_gamma
+
+        # weight of the cross entropy loss to residual vq codebooks
+
+        self.rvq_cross_entropy_loss_weight = rvq_cross_entropy_loss_weight
 
     @property
     def device(self):
@@ -678,6 +683,7 @@ class NaturalSpeech2(nn.Module):
     def forward(
         self,
         audio,
+        codes = None,
         *args,
         **kwargs
     ):
@@ -688,7 +694,7 @@ class NaturalSpeech2(nn.Module):
         if is_raw_audio:
             with torch.no_grad():
                 self.codec.eval()
-                audio, *_ = self.codec(audio, return_encoded = True)
+                audio, codes, _ = self.codec(audio, return_encoded = True)
 
         batch, n, d, device = *audio.shape, self.device
 
@@ -741,7 +747,25 @@ class NaturalSpeech2(nn.Module):
         elif self.objective == 'v':
             loss_weight = maybe_clipped_snr / (snr + 1)
 
-        return (loss * loss_weight).mean()
+        loss =  (loss * loss_weight).mean()
+
+        # cross entropy loss to codebooks
+
+        if self.rvq_cross_entropy_loss_weight == 0 or not exists(codes):
+            return loss
+
+        if self.objective == 'x0':
+            x_start = pred
+
+        elif self.objective == 'eps':
+            x_start = safe_div(audio - sigma * pred, alpha)
+
+        elif self.objective == 'v':
+            x_start = alpha * audio - sigma * pred
+
+        _, ce_loss = self.codec.rq(x_start, codes)
+
+        return loss + self.rvq_cross_entropy_loss_weight * ce_loss
 
 # trainer
 
