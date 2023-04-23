@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'naturalspeech2-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.0.4',
+  version = '0.0.5',
   license='MIT',
   description = 'Natural Speech 2 - Pytorch',
   author = 'Phil Wang',
@@ -20,7 +20,7 @@ setup(
     'accelerate',
     'audiolm-pytorch>=0.27.2',
     'beartype',
-    'einops>=0.4',
+    'einops>=0.6.1',
     'ema-pytorch',
     'torch>=1.6',
     'tqdm',
