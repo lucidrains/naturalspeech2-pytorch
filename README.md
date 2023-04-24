@@ -32,9 +32,9 @@ from naturalspeech2_pytorch import (
 
 codec = EncodecWrapper()
 
-model = Transformer(
-    dim = codec.codebook_dim,
-    depth = 12
+model = Model(
+    dim = 128,
+    depth = 6
 )
 
 # natural speech diffusion model
