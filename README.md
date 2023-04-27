@@ -4,7 +4,7 @@
 
 Implementation of <a href="https://arxiv.org/abs/2304.09116">Natural Speech 2</a>, Zero-shot Speech and Singing Synthesizer, in Pytorch
 
-They simply apply latent diffusion to residual vector quantized latents for these results.
+NaturalSpeech 2 is a TTS system that leverages a neural audio codec with continuous latent vectors and a latent diffusion model with non-autoregressive generation to enable natural and zero-shot text-to-speech synthesis
 
 ## Appreciation
 
