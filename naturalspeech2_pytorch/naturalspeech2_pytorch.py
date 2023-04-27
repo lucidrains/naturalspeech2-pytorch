@@ -11,6 +11,8 @@ from torch import nn, einsum
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 
+import torchaudio
+
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange
 
@@ -46,6 +48,9 @@ def default(val, d):
 
 def identity(t, *args, **kwargs):
     return t
+
+def has_int_squareroot(num):
+    return (math.sqrt(num) ** 2) == num
 
 # sinusoidal positional embeds
 
@@ -466,6 +471,7 @@ class NaturalSpeech2(nn.Module):
         model: Model,
         codec: Optional[Union[SoundStream, EncodecWrapper]] = None,
         *,
+        target_sample_hz = None,
         timesteps = 1000,
         use_ddim = True,
         noise_schedule = 'sigmoid',
@@ -481,6 +487,15 @@ class NaturalSpeech2(nn.Module):
         super().__init__()
         self.model = model
         self.codec = codec
+
+        assert exists(codec) or exists(target_sample_hz)
+
+        self.target_sample_hz = target_sample_hz
+        self.seq_len_multiple_of = None
+
+        if exists(codec):
+            self.target_sample_hz = codec.target_sample_hz
+            self.seq_len_multiple_of = codec.seq_len_multiple_of
 
         assert not exists(codec) or model.dim == codec.codebook_dim, f'transformer model dimension {model.dim} must be equal to codec dimension {codec.codebook_dim}'
 
@@ -531,6 +546,9 @@ class NaturalSpeech2(nn.Module):
     @property
     def device(self):
         return next(self.model.parameters()).device
+
+    def print(self, s):
+        return self.accelerator.print(s)
 
     def get_sampling_timesteps(self, batch, *, device):
         times = torch.linspace(1., 0., self.timesteps + 1, device = device)
@@ -778,8 +796,9 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model: NaturalSpeech2,
-        dataset: Dataset,
         *,
+        dataset: Optional[Dataset] = None,
+        folder = None,
         train_batch_size = 16,
         gradient_accumulate_every = 1,
         train_lr = 1e-4,
@@ -788,11 +807,16 @@ class Trainer(object):
         ema_decay = 0.995,
         adam_betas = (0.9, 0.99),
         save_and_sample_every = 1000,
-        num_samples = 25,
+        num_samples = 1,
         results_folder = './results',
         amp = False,
         fp16 = False,
+        use_ema = True,
         split_batches = True,
+        dataloader = None,
+        data_max_length = None,
+        data_max_length_seconds = 2,
+        sample_length = None
     ):
         super().__init__()
 
@@ -808,22 +832,48 @@ class Trainer(object):
         # model
 
         self.model = diffusion_model
+        assert exists(diffusion_model.codec)
+
         self.dim = diffusion_model.dim
 
-        # sampling and training hyperparameters
-
-        assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
-        self.num_samples = num_samples
-        self.save_and_sample_every = save_and_sample_every
+        # training hyperparameters
 
         self.batch_size = train_batch_size
         self.gradient_accumulate_every = gradient_accumulate_every
-
         self.train_num_steps = train_num_steps
 
         # dataset and dataloader
 
-        dl = DataLoader(dataset, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+        dl = dataloader
+
+        if not exists(dl):
+            assert exists(dataset) or exists(folder)
+
+            if exists(dataset):
+                self.ds = dataset
+            elif exists(folder):
+                # create dataset
+
+                if exists(data_max_length_seconds):
+                    assert not exists(data_max_length)
+                    data_max_length = int(data_max_length_seconds * diffusion_model.target_sample_hz)
+                else:
+                    assert exists(data_max_length)
+
+                self.ds = SoundDataset(
+                    folder,
+                    max_length = data_max_length,
+                    target_sample_hz = diffusion_model.target_sample_hz,
+                    seq_len_multiple_of = diffusion_model.seq_len_multiple_of
+                )
+
+                dl = DataLoader(
+                    self.ds,
+                    batch_size = train_batch_size,
+                    shuffle = True,
+                    pin_memory = True,
+                    num_workers = cpu_count()
+                )
 
         dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
@@ -834,9 +884,33 @@ class Trainer(object):
 
         # for logging results in a folder periodically
 
-        if self.accelerator.is_main_process:
-            self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
-            self.ema.to(self.device)
+        self.use_ema = use_ema
+        self.ema = None
+
+        if self.accelerator.is_main_process and use_ema:
+            # make sure codec is not part of the EMA
+            # encodec seems to be not deepcopyable, so this is a necessary hack
+
+            codec = diffusion_model.codec
+            diffusion_model.codec = None
+
+            self.ema = EMA(
+                diffusion_model,
+                beta = ema_decay,
+                update_every = ema_update_every,
+                ignore_startswith_names = set('codec.')
+            ).to(self.device)
+
+            diffusion_model.codec = codec
+            self.ema.ema_model.codec = codec
+
+        # sampling hyperparameters
+
+        self.sample_length = default(sample_length, data_max_length)
+        self.num_samples = num_samples
+        self.save_and_sample_every = save_and_sample_every
+
+        # results folder
 
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True)
@@ -849,6 +923,10 @@ class Trainer(object):
 
         self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
 
+    @property
+    def unwrapped_model(self):
+        return self.accelerator.unwrap_model(self.model)
+    
     @property
     def device(self):
         return self.accelerator.device
@@ -919,22 +997,35 @@ class Trainer(object):
                 accelerator.wait_for_everyone()
 
                 self.step += 1
+
                 if accelerator.is_main_process:
                     self.ema.update()
 
-                    if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                        self.ema.ema_model.eval()
+                    if True or self.step % self.save_and_sample_every == 0:
 
-                        with torch.no_grad():
-                            milestone = self.step // self.save_and_sample_every
-                            batches = num_to_groups(self.num_samples, self.batch_size)
-                            all_samples_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
+                        models = [(self.unwrapped_model, str(self.step))]
 
-                        all_samples = torch.cat(all_samples_list, dim = 0)
+                        if self.use_ema:
+                            models.append((self.ema.ema_model, f'{self.step}.ema'))
 
-                        torch.save(all_samples, str(self.results_folder / f'sample-{milestone}.png'))
+                        for model, label in models:
+                            model.eval()
+
+                            with torch.no_grad():
+                                generated = model.sample(
+                                    batch_size = self.num_samples,
+                                    length = self.sample_length
+                                )
+
+                            for ind, t in enumerate(generated):
+                                filename = str(self.results_folder / f'sample_{label}.flac')
+                                t = rearrange(t, 'n -> 1 n')
+                                torchaudio.save(filename, t.cpu().detach(), self.unwrapped_model.target_sample_hz)
+
+                        self.print(f'{steps}: saving to {str(self.results_folder)}')
+
                         self.save(milestone)
 
                 pbar.update(1)
 
-        accelerator.print('training complete')
+        self.print('training complete')

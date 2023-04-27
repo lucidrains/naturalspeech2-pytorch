@@ -1,9 +1,11 @@
 from setuptools import setup, find_packages
 
+exec(open('naturalspeech2_pytorch/version.py').read())
+
 setup(
   name = 'naturalspeech2-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.0.9',
+  version = __version__,
   license='MIT',
   description = 'Natural Speech 2 - Pytorch',
   author = 'Phil Wang',
