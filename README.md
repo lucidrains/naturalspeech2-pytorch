@@ -59,6 +59,21 @@ generated_audio = diffusion.sample(length = 1024) # (1, 327680)
 
 ```
 
+Or if you want a `Trainer` class to take care of the training and sampling loop, just simply do
+
+```python
+from naturalspeech2_pytorch import Trainer
+
+trainer = Trainer(
+    diffusion_model = diffusion,     # diffusion model + codec from above
+    folder = '/path/to/speech',
+    train_batch_size = 16,
+    gradient_accumulate_every = 2,
+)
+
+trainer.train()
+```
+
 ## Citations
 
 ```bibtex
