@@ -898,7 +898,7 @@ class Trainer(object):
                 diffusion_model,
                 beta = ema_decay,
                 update_every = ema_update_every,
-                ignore_startswith_names = set('codec.')
+                ignore_startswith_names = set(['codec.'])
             ).to(self.device)
 
             diffusion_model.codec = codec
