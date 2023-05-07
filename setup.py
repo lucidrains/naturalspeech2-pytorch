@@ -28,6 +28,10 @@ setup(
     'torch>=1.6',
     'tqdm',
     'vector-quantize-pytorch>=1.1.6'
+    'num2words',
+    'indic-num2words',
+    'inflect',
+    're'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',
