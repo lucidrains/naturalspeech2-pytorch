@@ -12,6 +12,8 @@ NaturalSpeech 2 is a TTS system that leverages a neural audio codec with continu
 
 - <a href="https://huggingface.co/">🤗 Huggingface</a> for the amazing accelerate library
 
+- <a href="https://github.com/manmay-nakhashi">Manmay</a> for submitting the initial code for phoneme, pitch, duration, and speech prompt encoders!
+
 ## Install
 
 ```bash
