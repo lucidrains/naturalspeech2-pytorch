@@ -1,8 +1,7 @@
-""" from https://github.com/coqui-ai/TTS/"""
 from typing import Callable, List
 
 from cleaner import phoneme_cleaners
-from utils.espeak_wrapper import ESpeak
+from utils.phonemizers.espeak_wrapper import ESpeak
 class Tokenizer:
     def __init__(
         self,
