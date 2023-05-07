@@ -1,14 +1,14 @@
 import re
-from utils.english.abbreviations import AbbreviationExpander
-from utils.english.number_norm import NumberNormalizer
-from utils.english.time_norm import TimeExpander
+from utils.expand.abbreviations import AbbreviationExpander
+from utils.expand.number_norm import NumberNormalizer
+from utils.expand.time_norm import TimeExpander
 
 class TextProcessor:
     def __init__(self, lang="en"):
         self.lang = lang
         self._whitespace_re = re.compile(r"\s+")
         # Example usage
-        self.ab_expander = AbbreviationExpander('utils/english/abbreviations.csv')
+        self.ab_expander = AbbreviationExpander('utils/expand/abbreviations.csv')
         self.time_expander = TimeExpander()
         self.num_normalizer = NumberNormalizer()
         # Add currency conversion rates
