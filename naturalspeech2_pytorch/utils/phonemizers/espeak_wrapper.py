@@ -100,8 +100,6 @@ class ESpeak(BasePhonemizer):
             If True, keep the punctuations after phonemization. Defaults to True.
 
     Example:
-
-        >>> from TTS.tts.utils.text.phonemizers import ESpeak
         >>> phonemizer = ESpeak("tr")
         >>> phonemizer.phonemize("Bu Türkçe, bir örnektir.", separator="|")
         'b|ʊ t|ˈø|r|k|tʃ|ɛ, b|ɪ|r œ|r|n|ˈɛ|c|t|ɪ|r.'
