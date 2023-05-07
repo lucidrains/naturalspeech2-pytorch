@@ -1,6 +1,6 @@
 from typing import Callable, List
 
-from cleaner import phoneme_cleaners
+from utils.cleaner import TextProcessor
 from utils.phonemizers.espeak_wrapper import ESpeak
 class Tokenizer:
     def __init__(
@@ -61,14 +61,16 @@ class Tokenizer:
         5. Text to token IDs
         """
         # TODO: text cleaner should pick the right routine based on the language
+        cleaned_text = None
         if self.text_cleaner is not None:
-            text = self.text_cleaner(text)
-        text = self.phonemizer.phonemize(text, separator="", language=language)
+            text = self.text_cleaner(text, language=language)
+            cleaned_text = text
+        phonemized = self.phonemizer.phonemize(text, separator="", language=language)
         if self.add_blank:
-            text = self.intersperse_blank_char(text, True)
+            phonemized = self.intersperse_blank_char(phonemized, True)
         if self.use_eos_bos:
-            text = self.pad_with_bos_eos(text)
-        return self.encode(text)
+            phonemized = self.pad_with_bos_eos(phonemized)
+        return self.encode(phonemized), cleaned_text, phonemized
 
     def ids_to_text(self, id_sequence: List[int]) -> str:
         """Converts a sequence of token IDs to a string of text."""
@@ -93,13 +95,14 @@ if __name__ == "__main__":
     _vowels = "iyɨʉɯuɪʏʊeøɘəɵɤoɛœɜɞʌɔæɐaɶɑɒᵻ"
     _non_pulmonic_consonants = "ʘɓǀɗǃʄǂɠǁʛ"
     _pulmonic_consonants = "pbtdʈɖcɟkɡqɢʔɴŋɲɳnɱmʙrʀⱱɾɽɸβfvθðszʃʒʂʐçʝxɣχʁħʕhɦɬɮʋɹɻjɰlɭʎʟ"
-    _suprasegmentals = "'̃ˈˌːˑ. "
+    _suprasegmentals = "'̃ˈˌːˑ. ,-"
     _other_symbols = "ʍwɥʜʢʡɕʑɺɧʲ"
     _diacrilics = "ɚ˞ɫ"
     _phonemes = _vowels + _non_pulmonic_consonants + _pulmonic_consonants + _suprasegmentals + _other_symbols + _diacrilics
-    tokenizer = Tokenizer(vocab = _phonemes, text_cleaner = phoneme_cleaners, phonemizer = ESpeak(language="en-us"))
-    print(tokenizer.text_to_ids("Hello this is a test."))
-    tokenizer = Tokenizer(vocab = _phonemes, text_cleaner = phoneme_cleaners, phonemizer = ESpeak(language="fr-fr"))
-    print(tokenizer.text_to_ids("Bonjour c'est un essai."))
-    tokenizer = Tokenizer(vocab = _phonemes, text_cleaner = phoneme_cleaners, phonemizer = ESpeak(language="hi"))
-    print(tokenizer.text_to_ids("नमस्ते यह एक परीक्षा है।"))
+    txt_cleaner = TextProcessor()
+    tokenizer = Tokenizer(vocab = _phonemes, text_cleaner = txt_cleaner.phoneme_cleaners, phonemizer = ESpeak(language="en-us"))
+    print(tokenizer.text_to_ids("Hello, Mr. Example, this is 9:30 am and  my number is 30.", language="en"))
+    tokenizer = Tokenizer(vocab = _phonemes, text_cleaner = txt_cleaner.phoneme_cleaners, phonemizer = ESpeak(language="fr-fr"))
+    print(tokenizer.text_to_ids("Hola, Sr. Ejemplo, son las 9:30 am y mi número es el 30.", language="es"))
+    tokenizer = Tokenizer(vocab = _phonemes, text_cleaner = txt_cleaner.phoneme_cleaners, phonemizer = ESpeak(language="hi"))
+    print(tokenizer.text_to_ids("हैलो, मिस्टर उदाहरण, यह सुबह 9:30 बजे है और मेरा नंबर 30 है।", language="hi"))

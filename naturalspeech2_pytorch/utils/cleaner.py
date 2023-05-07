@@ -1,36 +1,50 @@
 import re
-from utils.english.abbreviations import abbreviations_en
-from utils.english.number_norm import normalize_numbers as en_normalize_numbers
-from utils.english.time_norm import expand_time_english
+from utils.english.abbreviations import AbbreviationExpander
+from utils.english.number_norm import NumberNormalizer
+from utils.english.time_norm import TimeExpander
 
-# Regular expression matching whitespace:
-_whitespace_re = re.compile(r"\s+")
+class TextProcessor:
+    def __init__(self, lang="en"):
+        self.lang = lang
+        self._whitespace_re = re.compile(r"\s+")
+        # Example usage
+        self.ab_expander = AbbreviationExpander('utils/english/abbreviations.csv')
+        self.time_expander = TimeExpander()
+        self.num_normalizer = NumberNormalizer()
+        # Add currency conversion rates
+        symbol = '$'
+        conversion_rates ={0.01: "cent", 0.02: "cents", 1: "dollar", 2: "dollars" }
+        self.num_normalizer.add_currency(symbol, conversion_rates)
+    def lowercase(self, text):
+        return text.lower()
 
-def expand_abbreviations(text, lang="en"):
-    if lang == "en":
-        _abbreviations = abbreviations_en
-    else:
-        print("add new language abbrevations language not supported")
-    for regex, replacement in _abbreviations:
-        text = re.sub(regex, replacement, text)
-    return text
+    def collapse_whitespace(self, text):
+        return re.sub(self._whitespace_re, " ", text).strip()
 
-def lowercase(text):
-    return text.lower()
+    def remove_aux_symbols(self, text):
+        text = re.sub(r"[\<\>\(\)\[\]\"]+", "", text)
+        return text
 
-def collapse_whitespace(text):
-    return re.sub(_whitespace_re, " ", text).strip()
+    def phoneme_cleaners(self, text, language = 'en'):
+        text = self.time_expander.expand_time(text, language=language)
+        text = self.num_normalizer.normalize_numbers(text, language=language)
+        text = self.ab_expander.replace_text_abbreviations(text, language=language)
+        text = self.remove_aux_symbols(text)
+        text = self.collapse_whitespace(text)
+        return text
+if __name__ == "__main__":
+    # Create an instance for English
+    text_processor_en = TextProcessor(lang="en")
 
+    # Process English text
+    english_text = "Hello, Mr. Example, this is 9:30 am and  my number is 30."
+    processed_english_text = text_processor_en.phoneme_cleaners(english_text, language='en')
+    print(processed_english_text)
 
-def remove_aux_symbols(text):
-    text = re.sub(r"[\<\>\(\)\[\]\"]+", "", text)
-    return text
+    # Create an instance for Spanish
+    text_processor_es = TextProcessor(lang="es")
 
-def phoneme_cleaners(text):
-    """Pipeline for phonemes mode, including number and abbreviation expansion."""
-    text = expand_time_english(text)
-    text = en_normalize_numbers(text)
-    text = expand_abbreviations(text)
-    text = remove_aux_symbols(text)
-    text = collapse_whitespace(text)
-    return text
+    # Process Spanish text
+    spanish_text = "Hola, Sr. Ejemplo, son las 9:30 am y mi número es el 30."
+    processed_spanish_text = text_processor_es.phoneme_cleaners(spanish_text, language='es')
+    print(processed_spanish_text)
