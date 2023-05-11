@@ -125,9 +125,11 @@ class Attend(nn.Module):
         if self.use_flash:
             return self.flash_attn(q, k, v, mask = mask)
 
+        kv_einsum_eq = 'b j d' if k.ndim == 3 else 'b h j d'
+
         # similarity
 
-        sim = einsum("b h i d, b j d -> b h i j", q, k) * scale
+        sim = einsum(f"b h i d, {kv_einsum_eq} -> b h i j", q, k) * scale
 
         # key padding mask
 
@@ -148,6 +150,6 @@ class Attend(nn.Module):
 
         # aggregate values
 
-        out = einsum("b h i j, b j d -> b h i d", attn, v)
+        out = einsum(f"b h i j, {kv_einsum_eq} -> b h i d", attn, v)
 
         return out
