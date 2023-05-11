@@ -80,8 +80,11 @@ class Attend(nn.Module):
         # Recommended for multi-query single-key-value attention by Tri Dao
         # kv shape torch.Size([1, 512, 64]) -> torch.Size([1, 8, 512, 64])
 
-        k = rearrange(k, 'b ... -> b 1 ...').expand_as(q)
-        v = rearrange(v, 'b ... -> b 1 ...').expand_as(q)
+        if k.ndim == 3:
+            k = rearrange(k, 'b ... -> b 1 ...').expand_as(q)
+
+        if v.ndim == 3:
+            v = rearrange(v, 'b ... -> b 1 ...').expand_as(q)
 
         # Check if mask exists and expand to compatible shape
         # The mask is B L, so it would have to be expanded to B H N L
