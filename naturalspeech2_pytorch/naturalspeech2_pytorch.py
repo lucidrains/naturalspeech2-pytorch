@@ -224,7 +224,7 @@ class RMSNorm(nn.Module):
         gamma = default(self.gamma, 1)
         return F.normalize(x, dim = -1) * self.scale * gamma
 
-class Transformer(nn.Module):
+class ConditionableTransformer(nn.Module):
     def __init__(
         self,
         dim,
@@ -330,7 +330,7 @@ class Model(nn.Module):
 
         # transformer
 
-        self.transformer = Transformer(
+        self.transformer = ConditionableTransformer(
             dim = dim,
             depth = depth,
             dim_head = dim_head,
@@ -400,19 +400,198 @@ class Attention(nn.Module):
         dim_inner = dim_head * heads
 
         self.attend = Attend(causal = causal, dropout = dropout, use_flash = use_flash)
-        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
+        self.to_q = nn.Linear(dim, dim_inner, bias = False)
+        self.to_kv = nn.Linear(dim, dim_inner * 2, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
 
-    def forward(self, x):
+    def forward(self, x, context = None):
         h = self.heads
 
-        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        context = default(context, x)
+
+        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim = -1))
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
         out = self.attend(q, k, v)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
+
+# transformer encoder
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        depth,
+        causal = False,
+        dim_head = 64,
+        heads = 8,
+        use_flash = False,
+        dropout = 0.,
+        ff_mult = 4,
+        final_norm = False
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                RMSNorm(dim),
+                Attention(
+                    dim,
+                    causal = causal,
+                    dim_head = dim_head,
+                    heads = heads,
+                    dropout = dropout,
+                    use_flash = use_flash
+                ),
+                RMSNorm(dim),
+                FeedForward(
+                    dim,
+                    mult = ff_mult
+                )
+            ]))
+
+        self.norm = RMSNorm(dim) if final_norm else nn.Identity()
+
+    def forward(self, x):
+        for attn_norm, attn, ff_norm, ff in self.layers:
+            x = attn(attn_norm(x)) + x
+            x = ff(ff_norm(x)) + x
+
+        return self.norm(x)
+
+# phoneme - pitch - speech prompt - duration predictors
+
+class PhonemeEncoder(nn.Module):
+    def __init__(
+        self,
+        dim = 512,
+        dim_hidden = 1024,
+        kernel_size = 9,
+        depth = 6,
+        dim_head = 64,
+        heads = 8,
+        conv_dropout = 0.2,
+        attn_dropout = 0.,
+        use_flash = False
+    ):
+        super().__init__()
+
+        same_padding = (kernel_size - 1) // 2
+
+        self.conv = nn.Sequential(
+            Rearrange('b n c -> b c n'),
+            nn.Conv1d(dim, dim_hidden, kernel_size, padding = same_padding),
+            nn.SiLU(),
+            nn.Dropout(conv_dropout),
+            Rearrange('b c n -> b n c'),
+        )
+
+        self.transformer = Transformer(
+            dim = dim_hidden,
+            depth = depth,
+            dim_head = dim_head,
+            heads = heads,
+            dropout = attn_dropout,
+            use_flash = use_flash
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.transformer(x)
+        return x
+
+class SpeechPromptEncoder(nn.Module):
+
+    @beartype
+    def __init__(
+        self,
+        dims: Tuple[int] = (256, 2048, 2048, 2048, 2048, 512, 512, 512),
+        *,
+        kernel_size = 9,
+        padding = 4
+    ):
+        super().__init__()
+
+        dim_pairs = zip(dims[:-1], dims[1:])
+
+        modules = []
+        for dim_in, dim_out in dim_pairs:
+            modules.extend([
+                nn.Conv1d(dim_in, dim_out, kernel_size, padding = padding),
+                nn.SiLU()
+            ])
+
+        self.conv = nn.Sequential(
+            Rearrange('b n c -> b c n'),
+            *modules,
+            Rearrange('b c n -> b n c')
+        )
+
+        self.transformer = Transformer(
+            dim = 512,
+            depth = 6,
+            heads = 8,
+            dropout = 0.2
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.transformer(x)
+        return x
+
+# duration and pitch predictor seems to be the same
+
+class DurationOrPitchPredictor(nn.Module):
+    def __init__(
+        self,
+        depth = 30,
+        kernel_size = 3,
+        attn_depth = 10,
+        heads = 8,
+        dim_head = 64,
+        dim_hidden = 512,
+        dropout = 0.2
+    ):
+        super().__init__()
+
+        conv_layers = []
+
+        for _ in range(depth):
+            conv_layers.extend([
+                nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding = kernel_size // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+
+        self.conv_layers = nn.Sequential(*conv_layers)
+
+        self.attn_layers = nn.ModuleList([
+            Attention(dim_hidden, heads = heads, dim_head = dim_head)
+            for _ in range(attn_depth)
+        ])
+
+        self.to_pred = nn.Sequential(
+            Rearrange('b c n -> b n c'),
+            nn.Linear(hidden_size, 1),
+            nn.ReLU(),
+            Rearrange('b n 1 -> b n')
+        )
+
+    def forward(
+        self,
+        x,
+        encoded_prompts
+    ):
+        for attn in self.attn_layers:
+            x = attn(x, encoded_prompts, encoded_prompts)
+
+        x = self.conv_layers(x)
+
+        return self.to_pred(x)
 
 # tensor helper functions
 
