@@ -619,6 +619,51 @@ class DurationOrPitchPredictor(nn.Module):
 
         return F.l1_loss(pred, labels)
 
+# use perceiver resampler from flamingo paper - https://arxiv.org/abs/2204.14198
+# in lieu of "q-k-v" attention with the m queries becoming key / values on which ddpm network is conditioned on
+
+class PerceiverResampler(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        depth,
+        num_latents = 64, # m in the paper
+        dim_head = 64,
+        heads = 8,
+        ff_mult = 4,
+        use_flash_attn = True
+    ):
+        super().__init__()
+        self.latents = nn.Parameter(torch.randn(num_latents, dim))
+        nn.init.normal_(self.latents, std = 0.02)
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Attention(
+                    dim = dim,
+                    dim_head = dim_head,
+                    heads = heads,
+                    use_flash_attn = use_flash_attn,
+                    cross_attn_include_queries = True
+                ),
+                FeedForward(dim = dim, mult = ff_mult)
+            ]))
+
+        self.norm = RMSNorm(dim)
+
+    def forward(self, x):
+        batch = x.shape[0]
+
+        latents = repeat(self.latents, 'n d -> b n d', b = batch)
+
+        for attn, ff in self.layers:
+            latents = attn(latents, x) + latents
+            latents = ff(latents) + latents
+
+        return self.norm(latents)
+
 # tensor helper functions
 
 def log(t, eps = 1e-20):
