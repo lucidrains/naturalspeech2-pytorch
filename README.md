@@ -123,3 +123,13 @@ trainer.train()
     year    = {2023}
 }
 ```
+
+```bibtex
+@article{Alayrac2022FlamingoAV,
+    title   = {Flamingo: a Visual Language Model for Few-Shot Learning},
+    author  = {Jean-Baptiste Alayrac and Jeff Donahue and Pauline Luc and Antoine Miech and Iain Barr and Yana Hasson and Karel Lenc and Arthur Mensch and Katie Millican and Malcolm Reynolds and Roman Ring and Eliza Rutherford and Serkan Cabi and Tengda Han and Zhitao Gong and Sina Samangooei and Marianne Monteiro and Jacob Menick and Sebastian Borgeaud and Andy Brock and Aida Nematzadeh and Sahand Sharifzadeh and Mikolaj Binkowski and Ricardo Barreira and Oriol Vinyals and Andrew Zisserman and Karen Simonyan},
+    journal  = {ArXiv},
+    year     = {2022},
+    volume   = {abs/2204.14198}
+}
+```
