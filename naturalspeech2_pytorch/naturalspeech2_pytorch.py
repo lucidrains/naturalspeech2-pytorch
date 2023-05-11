@@ -391,11 +391,13 @@ class Attention(nn.Module):
         dim_head = 64,
         heads = 8,
         dropout = 0.,
-        use_flash = False
+        use_flash = False,
+        cross_attn_include_queries = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
         self.heads = heads
+        self.cross_attn_include_queries = cross_attn_include_queries
 
         dim_inner = dim_head * heads
 
@@ -405,9 +407,12 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
 
     def forward(self, x, context = None):
-        h = self.heads
+        h, has_context = self.heads, exists(context)
 
         context = default(context, x)
+
+        if has_context and self.cross_attn_include_queries:
+            context = torch.cat((x, context), dim = -2)
 
         q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim = -1))
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
@@ -558,7 +563,6 @@ class DurationOrPitchPredictor(nn.Module):
         self,
         depth = 30,
         kernel_size = 3,
-        attn_depth = 10,
         heads = 8,
         dim_head = 64,
         dim_hidden = 512,
@@ -584,7 +588,8 @@ class DurationOrPitchPredictor(nn.Module):
                 heads = heads,
                 dim_head = dim_head,
                 dropout = dropout,
-                use_flash_attn = use_flash_attn
+                use_flash_attn = use_flash_attn,
+                cross_attn_include_queries = True
             )
             for _ in range(attn_depth)
         ])
@@ -599,14 +604,20 @@ class DurationOrPitchPredictor(nn.Module):
     def forward(
         self,
         x,
-        encoded_prompts
+        encoded_prompts,
+        labels = None
     ):
-        for attn in self.attn_layers:
-            x = attn(x, encoded_prompts, encoded_prompts)
-
         x = self.conv_layers(x)
 
-        return self.to_pred(x)
+        for attn in self.attn_layers:
+            x = attn(x, encoded_prompts)
+
+        pred = self.to_pred(x)
+
+        if not exists(labels):
+            return pred
+
+        return F.l1_loss(pred, labels)
 
 # tensor helper functions
 
