@@ -1,4 +1,6 @@
-<img src="./naturalspeech2.png" width="450px"></img>
+<img src="./diagram.png" width="450px"></img>
+
+<img src="./diagram2.png" width="450px"></img>
 
 ## Natural Speech 2 - Pytorch (wip)
 
