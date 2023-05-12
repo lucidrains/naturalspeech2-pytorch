@@ -52,6 +52,16 @@ def identity(t, *args, **kwargs):
 def has_int_squareroot(num):
     return (math.sqrt(num) ** 2) == num
 
+# tensor helpers
+
+def prob_mask_like(shape, prob, device):
+    if prob == 1:
+        return torch.ones(shape, device = device, dtype = torch.bool)
+    elif prob == 0:
+        return torch.zeros(shape, device = device, dtype = torch.bool)
+    else:
+        return torch.zeros(shape, device = device).float().uniform_(0, 1) < prob
+
 # sinusoidal positional embeds
 
 class LearnedSinusoidalPosEmb(nn.Module):
@@ -535,7 +545,8 @@ class Model(nn.Module):
         speech_prompt_encoder: Optional[SpeechPromptEncoder] = None,
         dim_prompt = None,
         num_latents_m = 32,   # number of latents to be perceiver resampled ('q-k-v' with 'm' queries in the paper)
-        resampler_depth = 2
+        resampler_depth = 2,
+        cond_drop_prob = 0.
     ):
         super().__init__()
         self.dim = dim
@@ -554,6 +565,7 @@ class Model(nn.Module):
 
         condition_on_prompt = exists(speech_prompt_encoder)
 
+        self.cond_drop_prob = cond_drop_prob # for classifier free guidance
         self.condition_on_prompt = condition_on_prompt
         self.to_prompt_cond = None
 
@@ -562,6 +574,12 @@ class Model(nn.Module):
 
             self.speech_prompt_encoder = speech_prompt_encoder
             assert speech_prompt_encoder.dim_out == dim_prompt
+
+            self.null_prompt_cond = nn.Parameter(torch.randn(dim_time))
+            self.null_prompt_tokens = nn.Parameter(torch.randn(num_latents_m, dim))
+
+            nn.init.normal_(self.null_prompt_cond, std = 0.02)
+            nn.init.normal_(self.null_prompt_tokens, std = 0.02)
 
             self.to_prompt_cond = Sequential(
                 Reduce('b n d -> b d', 'mean'),
@@ -606,12 +624,37 @@ class Model(nn.Module):
             cross_attn = condition_on_prompt
         )
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    def forward_with_cond_scale(
+        self,
+        *args,
+        cond_scale = 1.,
+        **kwargs
+    ):
+        logits = self.forward(*args, cond_drop_prob = 0., **kwargs)
+
+        if cond_scale == 1.:
+            return logits
+
+        null_logits = self.forward(*args, cond_drop_prob = 1., **kwargs)
+
+        return null_logits + (logits - null_logits) * cond_scale
+
     def forward(
         self,
         x,
         times,
-        prompt = None
+        prompt = None,
+        cond_drop_prob = None
     ):
+        b = x.shape[0]
+        cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
+
+        drop_mask = prob_mask_like((b,), cond_drop_prob, self.device)
+
         t = self.to_time_cond(times)
         c = None
 
@@ -619,10 +662,23 @@ class Model(nn.Module):
             assert exists(prompt)
             encoded_prompt = self.speech_prompt_encoder(prompt)
 
-            p = self.to_prompt_cond(encoded_prompt)
-            t = torch.cat((t, p), dim = -1)
+            prompt_cond = self.to_prompt_cond(encoded_prompt)
 
-            c = self.perceiver_resampler(encoded_prompt)
+            prompt_cond = torch.where(
+                rearrange(drop_mask, 'b -> b 1'),
+                self.null_prompt_cond,
+                prompt_cond,
+            )
+
+            t = torch.cat((t, prompt_cond), dim = -1)
+
+            resampled_prompt_tokens = self.perceiver_resampler(encoded_prompt)
+
+            c = torch.where(
+                rearrange(drop_mask, 'b -> b 1 1'),
+                self.null_prompt_tokens,
+                resampled_prompt_tokens
+            )
 
         x = rearrange(x, 'b n d -> b d n')
         x = self.wavenet(x, t)
@@ -884,7 +940,7 @@ class NaturalSpeech2(nn.Module):
         return times
 
     @torch.no_grad()
-    def ddpm_sample(self, shape, prompt = None, time_difference = None):
+    def ddpm_sample(self, shape, prompt = None, time_difference = None, cond_scale = 1.):
         batch, device = shape[0], self.device
 
         time_difference = default(time_difference, self.time_difference)
@@ -906,7 +962,7 @@ class NaturalSpeech2(nn.Module):
 
             # get predicted x0
 
-            model_output = self.model(audio, noise_cond, prompt = prompt)
+            model_output = self.model.forward_with_cond_scale(audio, noise_cond, prompt = prompt, cond_scale = cond_scale)
 
             # get log(snr)
 
@@ -953,7 +1009,7 @@ class NaturalSpeech2(nn.Module):
         return audio
 
     @torch.no_grad()
-    def ddim_sample(self, shape, prompt = None, time_difference = None):
+    def ddim_sample(self, shape, prompt = None, time_difference = None, cond_scale = 1.):
         batch, device = shape[0], self.device
 
         time_difference = default(time_difference, self.time_difference)
@@ -983,7 +1039,7 @@ class NaturalSpeech2(nn.Module):
 
             # predict x0
 
-            model_output = self.model(audio, times, prompt = prompt)
+            model_output = self.model.forward_with_cond_scale(audio, times, prompt = prompt, cond_scale = cond_scale)
 
             # calculate x0 and noise
 
@@ -1028,7 +1084,8 @@ class NaturalSpeech2(nn.Module):
         *,
         length,
         prompt = None,
-        batch_size = 1
+        batch_size = 1,
+        cond_scale = 1.
     ):
         sample_fn = self.ddpm_sample if not self.use_ddim else self.ddim_sample
 
@@ -1037,7 +1094,7 @@ class NaturalSpeech2(nn.Module):
         if exists(prompt):
             batch_size = prompt.shape[0]
 
-        audio = sample_fn((batch_size, length, self.dim), prompt = prompt)
+        audio = sample_fn((batch_size, length, self.dim), prompt = prompt, cond_scale = cond_scale)
 
         if exists(self.codec):
             audio = self.codec.decode(audio)

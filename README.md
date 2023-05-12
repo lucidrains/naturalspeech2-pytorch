@@ -88,7 +88,8 @@ prompt_encoder = SpeechPromptEncoder(
 model = Model(
     dim = 128,
     depth = 6,
-    speech_prompt_encoder = prompt_encoder  # pass in the SpeechPromptEncoder
+    speech_prompt_encoder = prompt_encoder,  # pass in the SpeechPromptEncoder
+    cond_drop_prob = 0.25                    # dropout prompt conditioning with this probability, for classifier free guidance
 )
 
 # natural speech diffusion model
@@ -110,7 +111,7 @@ loss.backward()
 # do the above in a loop for a lot of raw audio data...
 # then you can sample from your generative model as so
 
-generated_audio = diffusion.sample(length = 1024, prompt = prompt) # pass in your prompt
+generated_audio = diffusion.sample(length = 1024, prompt = prompt, cond_scale = 3.) # pass in your prompt - classifier free guidance scale of 3 (1 would be no classifier free guidance)
 ```
 
 Or if you want a `Trainer` class to take care of the training and sampling loop, just simply do
@@ -131,8 +132,8 @@ trainer.train()
 ## Todo
 
 - [x] complete perceiver then cross attention conditioning on ddpm side
+- [x] add classifier free guidance, even if not in paper
 
-- [ ] add classifier free guidance, even if not in paper
 - [ ] add self-conditioning on ddpm side
 - [ ] complete duration / pitch prediction during training
 - [ ] take care of automatic slicing of audio for prompt, being aware of minimal audio segment as allowed by the codec model
