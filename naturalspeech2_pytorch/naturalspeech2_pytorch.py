@@ -1353,7 +1353,7 @@ class Trainer(object):
                 if accelerator.is_main_process:
                     self.ema.update()
 
-                    if True or self.step % self.save_and_sample_every == 0:
+                    if self.step % self.save_and_sample_every == 0:
 
                         models = [(self.unwrapped_model, str(self.step))]
 
