@@ -11,7 +11,8 @@ from naturalspeech2_pytorch.naturalspeech2_pytorch import (
     Wavenet,
     Model,
     Trainer,
-    PhonemeEncoder
+    PhonemeEncoder,
+    DurationPitchPredictor
 )
 
 from audiolm_pytorch import (
