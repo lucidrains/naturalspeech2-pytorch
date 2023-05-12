@@ -516,6 +516,7 @@ class SpeechPromptEncoder(nn.Module):
     @beartype
     def __init__(
         self,
+        codec: Optional[Union[SoundStream, EncodecWrapper]] = None,
         dims: Tuple[int] = (256, 2048, 2048, 2048, 2048, 512, 512, 512),
         *,
         depth,
@@ -528,6 +529,11 @@ class SpeechPromptEncoder(nn.Module):
 
     ):
         super().__init__()
+
+        self.codec = codec
+
+        if exists(codec):
+            dims = [codec.codebook_dim, *dims]
 
         dim_pairs = zip(dims[:-1], dims[1:])
 
@@ -550,10 +556,18 @@ class SpeechPromptEncoder(nn.Module):
             heads = heads,
             dim_head = dim_head,
             dropout = dropout,
-            use_flash_attn = use_flash_attn
+            use_flash = use_flash_attn
         )
 
     def forward(self, x):
+        is_raw_audio = x.ndim == 2
+        assert not (is_raw_audio and not exists(self.codec))
+
+        if exists(self.codec) and is_raw_audio:
+            with torch.no_grad():
+                self.codec.eval()
+                x, *_ = self.codec(x, return_encoded = True)
+
         x = self.conv(x)
         x = self.transformer(x)
         return x
