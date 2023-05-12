@@ -135,6 +135,7 @@ trainer.train()
 - [ ] add classifier free guidance, even if not in paper
 - [ ] add self-conditioning on ddpm side
 - [ ] complete duration / pitch prediction during training
+- [ ] take care of automatic slicing of audio for prompt, being aware of minimal audio segment as allowed by the codec model
 
 ## Citations
 
