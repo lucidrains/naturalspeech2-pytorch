@@ -254,6 +254,8 @@ class PerceiverResampler(nn.Module):
         super().__init__()
         dim_context = default(dim_context, dim)
 
+        self.proj_context = nn.Linear(dim_context, dim) if dim_context != dim else nn.Identity()
+
         self.latents = nn.Parameter(torch.randn(num_latents, dim))
         nn.init.normal_(self.latents, std = 0.02)
 
@@ -263,9 +265,8 @@ class PerceiverResampler(nn.Module):
                 Attention(
                     dim = dim,
                     dim_head = dim_head,
-                    dim_context = dim_context,
                     heads = heads,
-                    use_flash_attn = use_flash_attn,
+                    use_flash = use_flash_attn,
                     cross_attn_include_queries = True
                 ),
                 FeedForward(dim = dim, mult = ff_mult)
@@ -275,6 +276,8 @@ class PerceiverResampler(nn.Module):
 
     def forward(self, x):
         batch = x.shape[0]
+
+        x = self.proj_context(x)
 
         latents = repeat(self.latents, 'n d -> b n d', b = batch)
 
@@ -431,14 +434,25 @@ class Wavenet(nn.Module):
         return self.final_conv(x.sum(dim = 0))
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim, scale = True):
+    def __init__(self, dim, scale = True, dim_cond = None):
         super().__init__()
+        self.cond = exists(dim_cond)
+        self.to_gamma_beta = nn.Linear(dim_cond, dim * 2) if self.cond else None
+
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(dim)) if scale else None
 
-    def forward(self, x):
+    def forward(self, x, cond = None):
         gamma = default(self.gamma, 1)
-        return F.normalize(x, dim = -1) * self.scale * gamma
+        out = F.normalize(x, dim = -1) * self.scale * gamma
+
+        if not self.cond:
+            return out
+
+        assert exists(cond)
+        gamma, beta = self.to_gamma_beta(cond).chunk(2, dim = -1)
+        gamma, beta = map(lambda t: rearrange(t, 'b d -> b 1 d'), (gamma, beta))
+        return out * gamma + beta
 
 class ConditionableTransformer(nn.Module):
     def __init__(
@@ -451,6 +465,7 @@ class ConditionableTransformer(nn.Module):
         ff_mult = 4,
         ff_causal_conv = False,
         dim_cond_mult = None,
+        cross_attn = False,
         use_flash = False
     ):
         super().__init__()
@@ -459,17 +474,16 @@ class ConditionableTransformer(nn.Module):
 
         cond = exists(dim_cond_mult)
 
-        self.to_cond = None
-        self.cond = cond
-
-        if cond:
-            self.to_cond = nn.Linear(dim * dim_cond_mult, dim * 4)
+        maybe_adaptive_norm_kwargs = dict(scale = not cond, dim_cond = dim * dim_cond_mult) if cond else dict()
+        rmsnorm = partial(RMSNorm, **maybe_adaptive_norm_kwargs)
 
         for _ in range(depth):
             self.layers.append(mlist([
-                RMSNorm(dim, scale = not cond),
+                rmsnorm(dim),
                 Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash = use_flash),
-                RMSNorm(dim, scale = not cond),
+                rmsnorm(dim) if cross_attn else None,
+                Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash = use_flash) if cross_attn else None,
+                rmsnorm(dim),
                 FeedForward(dim = dim, mult = ff_mult, causal_conv = ff_causal_conv)
             ]))
 
@@ -481,29 +495,24 @@ class ConditionableTransformer(nn.Module):
     def forward(
         self,
         x,
-        times = None
+        times = None,
+        context = None
     ):
-        if self.cond:
-            assert exists(times)
-            t = self.to_cond(times)
-            t = rearrange(t, 'b d -> b 1 d')
-            t_attn_gamma, t_attn_beta, t_ff_gamma, t_ff_beta = t.chunk(4, dim = -1)
+        t = times
 
-        for attn_norm, attn, ff_norm, ff in self.layers:
+        for attn_norm, attn, cross_attn_norm, cross_attn, ff_norm, ff in self.layers:
             res = x
-            x = attn_norm(x)
-
-            if self.cond:
-                x = x * t_attn_gamma + t_attn_beta
-
+            x = attn_norm(x, cond = t)
             x = attn(x) + res
 
+            if exists(cross_attn):
+                assert exists(context)
+                res = x
+                x = cross_attn_norm(x, cond = t)
+                x = cross_attn(x, context = context) + res
+
             res = x
-            x = ff_norm(x)
-
-            if self.cond:
-                x = x * t_ff_gamma + t_ff_beta
-
+            x = ff_norm(x, cond = t)
             x = ff(x) + res
 
         return self.to_pred(x)
@@ -525,7 +534,8 @@ class Model(nn.Module):
         use_flash_attn = True,
         speech_prompt_encoder: Optional[SpeechPromptEncoder] = None,
         dim_prompt = None,
-        num_latents_m = 32   # number of latents to be perceiver resampled ('q-k-v' with 'm' queries in the paper)
+        num_latents_m = 32,   # number of latents to be perceiver resampled ('q-k-v' with 'm' queries in the paper)
+        resampler_depth = 2
     ):
         super().__init__()
         self.dim = dim
@@ -542,8 +552,9 @@ class Model(nn.Module):
 
         # prompt condition
 
-        self.condition_on_prompt = exists(speech_prompt_encoder)
+        condition_on_prompt = exists(speech_prompt_encoder)
 
+        self.condition_on_prompt = condition_on_prompt
         self.to_prompt_cond = None
 
         if self.condition_on_prompt:
@@ -558,9 +569,19 @@ class Model(nn.Module):
                 nn.SiLU()
             )
 
+            self.perceiver_resampler = PerceiverResampler(
+                dim = dim,
+                dim_context = dim_prompt,
+                num_latents = num_latents_m,
+                depth = resampler_depth,
+                dim_head = dim_head,
+                heads = heads,
+                use_flash_attn = use_flash_attn
+            )
+
         # conditioning includes time and optionally prompt
 
-        dim_cond_mult = dim_cond_mult * (2 if self.condition_on_prompt else 1)
+        dim_cond_mult = dim_cond_mult * (2 if condition_on_prompt else 1)
 
         # wavenet
 
@@ -582,6 +603,7 @@ class Model(nn.Module):
             ff_causal_conv = True,
             dim_cond_mult = dim_cond_mult,
             use_flash = use_flash_attn,
+            cross_attn = condition_on_prompt
         )
 
     def forward(
@@ -591,6 +613,7 @@ class Model(nn.Module):
         prompt = None
     ):
         t = self.to_time_cond(times)
+        c = None
 
         if exists(self.to_prompt_cond):
             assert exists(prompt)
@@ -599,11 +622,13 @@ class Model(nn.Module):
             p = self.to_prompt_cond(encoded_prompt)
             t = torch.cat((t, p), dim = -1)
 
+            c = self.perceiver_resampler(encoded_prompt)
+
         x = rearrange(x, 'b n d -> b d n')
         x = self.wavenet(x, t)
         x = rearrange(x, 'b d n -> b n d')
 
-        x = self.transformer(x, t)
+        x = self.transformer(x, t, context = c)
         return x
 
 # feedforward

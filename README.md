@@ -130,7 +130,8 @@ trainer.train()
 
 ## Todo
 
-- [ ] complete perceiver then cross attention conditioning on ddpm side
+- [x] complete perceiver then cross attention conditioning on ddpm side
+
 - [ ] add classifier free guidance, even if not in paper
 - [ ] add self-conditioning on ddpm side
 - [ ] complete duration / pitch prediction during training
