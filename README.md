@@ -139,6 +139,7 @@ trainer.train()
 - [ ] add self-conditioning on ddpm side
 - [ ] complete duration / pitch prediction during training
 - [ ] take care of automatic slicing of audio for prompt, being aware of minimal audio segment as allowed by the codec model
+- [ ] make sure curtail_from_left works for encodec, figure out what they are doing
 
 ## Citations
 
