@@ -1074,7 +1074,7 @@ class NaturalSpeech2(nn.Module):
         if is_raw_prompt:
             with torch.no_grad():
                 self.codec.eval()
-                prompt, _, _ = self.codec(prompt, return_encoded = True)
+                prompt, _, _ = self.codec(prompt, curtail_from_left = True, return_encoded = True)
 
         return prompt
 

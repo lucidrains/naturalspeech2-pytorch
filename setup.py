@@ -20,7 +20,7 @@ setup(
   ],
   install_requires=[
     'accelerate',
-    'audiolm-pytorch>=0.30.0',
+    'audiolm-pytorch>=0.30.2',
     'beartype',
     'einops>=0.6.1',
     'ema-pytorch',
