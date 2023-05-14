@@ -8,6 +8,8 @@ Implementation of <a href="https://arxiv.org/abs/2304.09116">Natural Speech 2</a
 
 NaturalSpeech 2 is a TTS system that leverages a neural audio codec with continuous latent vectors and a latent diffusion model with non-autoregressive generation to enable natural and zero-shot text-to-speech synthesis
 
+This repository will use denoising diffusion rather than score-based SDE, and may potentially offer elucidated version as well. It will also offer improvements for the attention / transformer components wherever applicable.
+
 ## Appreciation
 
 - <a href="https://stability.ai/">Stability</a> and <a href="https://huggingface.co/">🤗 Huggingface</a> for their generous sponsorships to work on and open source cutting edge artificial intelligence research
