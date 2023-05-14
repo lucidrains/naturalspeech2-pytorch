@@ -14,7 +14,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchaudio
 
 from einops import rearrange, reduce, repeat
-from einops.layers.torch import Rearrange
+from einops.layers.torch import Rearrange, Reduce
 
 from audiolm_pytorch import SoundStream, EncodecWrapper
 from audiolm_pytorch.data import SoundDataset, get_dataloader
@@ -52,6 +52,16 @@ def identity(t, *args, **kwargs):
 def has_int_squareroot(num):
     return (math.sqrt(num) ** 2) == num
 
+# tensor helpers
+
+def prob_mask_like(shape, prob, device):
+    if prob == 1:
+        return torch.ones(shape, device = device, dtype = torch.bool)
+    elif prob == 0:
+        return torch.zeros(shape, device = device, dtype = torch.bool)
+    else:
+        return torch.zeros(shape, device = device).float().uniform_(0, 1) < prob
+
 # sinusoidal positional embeds
 
 class LearnedSinusoidalPosEmb(nn.Module):
@@ -67,6 +77,225 @@ class LearnedSinusoidalPosEmb(nn.Module):
         fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
         fouriered = torch.cat((x, fouriered), dim = -1)
         return fouriered
+
+# peripheral models
+
+# phoneme - pitch - speech prompt - duration predictors
+
+class PhonemeEncoder(nn.Module):
+    def __init__(
+        self,
+        dim = 512,
+        dim_hidden = 1024,
+        kernel_size = 9,
+        depth = 6,
+        dim_head = 64,
+        heads = 8,
+        conv_dropout = 0.2,
+        attn_dropout = 0.,
+        use_flash = False
+    ):
+        super().__init__()
+
+        same_padding = (kernel_size - 1) // 2
+
+        self.conv = nn.Sequential(
+            Rearrange('b n c -> b c n'),
+            nn.Conv1d(dim, dim_hidden, kernel_size, padding = same_padding),
+            nn.SiLU(),
+            nn.Dropout(conv_dropout),
+            Rearrange('b c n -> b n c'),
+        )
+
+        self.transformer = Transformer(
+            dim = dim_hidden,
+            depth = depth,
+            dim_head = dim_head,
+            heads = heads,
+            dropout = attn_dropout,
+            use_flash = use_flash
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.transformer(x)
+        return x
+
+class SpeechPromptEncoder(nn.Module):
+
+    @beartype
+    def __init__(
+        self,
+        dim_codebook,
+        dims: Tuple[int] = (256, 2048, 2048, 2048, 2048, 512, 512, 512),
+        *,
+        depth,
+        heads = 8,
+        dim_head = 64,
+        dropout = 0.2,
+        kernel_size = 9,
+        padding = 4,
+        use_flash_attn = True
+
+    ):
+        super().__init__()
+
+        dims = [dim_codebook, *dims]
+
+        self.dim, self.dim_out = dims[0], dims[-1]
+
+        dim_pairs = zip(dims[:-1], dims[1:])
+
+        modules = []
+        for dim_in, dim_out in dim_pairs:
+            modules.extend([
+                nn.Conv1d(dim_in, dim_out, kernel_size, padding = padding),
+                nn.SiLU()
+            ])
+
+        self.conv = nn.Sequential(
+            Rearrange('b n c -> b c n'),
+            *modules,
+            Rearrange('b c n -> b n c')
+        )
+
+        self.transformer = Transformer(
+            dim = dims[-1],
+            depth = depth,
+            heads = heads,
+            dim_head = dim_head,
+            dropout = dropout,
+            use_flash = use_flash_attn
+        )
+
+    def forward(self, x):
+        assert x.shape[-1] == self.dim
+
+        x = self.conv(x)
+        x = self.transformer(x)
+        return x
+
+# duration and pitch predictor seems to be the same
+
+class DurationPitchPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        num_phoneme_tokens,
+        dim_encoded_prompts = None,
+        depth = 30,
+        kernel_size = 3,
+        heads = 8,
+        dim_head = 64,
+        dim_hidden = 512,
+        dropout = 0.2,
+        use_flash_attn = False
+    ):
+        super().__init__()
+        dim_encoded_prompts = default(dim_encoded_prompts, dim)
+
+        self.phoneme_token_emb = nn.Embedding(num_phoneme_tokens, dim)
+
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                nn.Sequential(
+                    Rearrange('b n c -> b c n'),
+                    nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding = kernel_size // 2),
+                    nn.SiLU(),
+                    nn.Dropout(dropout),
+                    Rearrange('b c n -> b n c'),
+                ),
+                RMSNorm(dim),
+                Attention(
+                    dim_hidden,
+                    dim_context = dim_encoded_prompts,
+                    heads = heads,
+                    dim_head = dim_head,
+                    dropout = dropout,
+                    use_flash = use_flash_attn,
+                    cross_attn_include_queries = True
+                )
+            ]))
+
+        self.to_pred = nn.Sequential(
+            nn.Linear(dim_hidden, 2),
+            nn.ReLU()
+        )
+
+    def forward(
+        self,
+        x,
+        encoded_prompts,
+        duration = None,
+        pitch = None
+    ):
+        x = self.phoneme_token_emb(x)
+
+        for conv, norm, attn in self.layers:
+            x = conv(x)
+            x = attn(norm(x), encoded_prompts) + x
+
+        duration_pred, pitch_pred = self.to_pred(x).unbind(dim = -1)
+
+        duration_return = F.l1_loss(duration, duration_pred) if exists(duration) else duration_pred
+        pitch_return = F.l1_loss(pitch, pitch_pred) if exists(pitch) else pitch_pred
+
+        return duration_return, pitch_return
+
+# use perceiver resampler from flamingo paper - https://arxiv.org/abs/2204.14198
+# in lieu of "q-k-v" attention with the m queries becoming key / values on which ddpm network is conditioned on
+
+class PerceiverResampler(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        depth,
+        dim_context = None,
+        num_latents = 64, # m in the paper
+        dim_head = 64,
+        heads = 8,
+        ff_mult = 4,
+        use_flash_attn = True
+    ):
+        super().__init__()
+        dim_context = default(dim_context, dim)
+
+        self.proj_context = nn.Linear(dim_context, dim) if dim_context != dim else nn.Identity()
+
+        self.latents = nn.Parameter(torch.randn(num_latents, dim))
+        nn.init.normal_(self.latents, std = 0.02)
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Attention(
+                    dim = dim,
+                    dim_head = dim_head,
+                    heads = heads,
+                    use_flash = use_flash_attn,
+                    cross_attn_include_queries = True
+                ),
+                FeedForward(dim = dim, mult = ff_mult)
+            ]))
+
+        self.norm = RMSNorm(dim)
+
+    def forward(self, x):
+        batch = x.shape[0]
+
+        x = self.proj_context(x)
+
+        latents = repeat(self.latents, 'n d -> b n d', b = batch)
+
+        for attn, ff in self.layers:
+            latents = attn(latents, x) + latents
+            latents = ff(latents) + latents
+
+        return self.norm(latents)
 
 # model, which is wavenet + transformer
 
@@ -92,15 +321,15 @@ class WavenetResBlock(nn.Module):
         dilation,
         kernel_size = 3,
         skip_conv = False,
-        dim_time_mult = None
+        dim_cond_mult = None
     ):
         super().__init__()
 
-        self.cond_time = exists(dim_time_mult)
+        self.cond = exists(dim_cond_mult)
         self.to_time_cond = None
 
-        if self.cond_time:
-            self.to_time_cond = nn.Linear(dim * dim_time_mult, dim * 2)
+        if self.cond:
+            self.to_time_cond = nn.Linear(dim * dim_cond_mult, dim * 2)
 
         self.conv = CausalConv1d(dim, dim, kernel_size, dilation = dilation)
         self.res_conv = CausalConv1d(dim, dim, 1)
@@ -108,7 +337,7 @@ class WavenetResBlock(nn.Module):
 
     def forward(self, x, t = None):
 
-        if self.cond_time:
+        if self.cond:
             assert exists(t)
             t = self.to_time_cond(t)
             t = rearrange(t, 'b c -> b c 1')
@@ -118,7 +347,7 @@ class WavenetResBlock(nn.Module):
 
         x = self.conv(x)
 
-        if self.cond_time:
+        if self.cond:
             x = x * t_gamma + t_beta
 
         x = x.tanh() * x.sigmoid()
@@ -140,7 +369,7 @@ class WavenetStack(nn.Module):
         layers,
         kernel_size = 3,
         has_skip = False,
-        dim_time_mult = None
+        dim_cond_mult = None
     ):
         super().__init__()
         dilations = 2 ** torch.arange(layers)
@@ -154,7 +383,7 @@ class WavenetStack(nn.Module):
                 kernel_size = kernel_size,
                 dilation = dilation,
                 skip_conv = has_skip,
-                dim_time_mult = dim_time_mult
+                dim_cond_mult = dim_cond_mult
             )
 
             self.blocks.append(block)
@@ -185,7 +414,7 @@ class Wavenet(nn.Module):
         stacks,
         layers,
         init_conv_kernel = 3,
-        dim_time_mult = None
+        dim_cond_mult = None
     ):
         super().__init__()
         self.init_conv = CausalConv1d(dim, dim, init_conv_kernel)
@@ -197,7 +426,7 @@ class Wavenet(nn.Module):
             stack = WavenetStack(
                 dim,
                 layers = layers,
-                dim_time_mult = dim_time_mult,
+                dim_cond_mult = dim_cond_mult,
                 has_skip = is_last
             )
 
@@ -215,16 +444,27 @@ class Wavenet(nn.Module):
         return self.final_conv(x.sum(dim = 0))
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim, scale = True):
+    def __init__(self, dim, scale = True, dim_cond = None):
         super().__init__()
+        self.cond = exists(dim_cond)
+        self.to_gamma_beta = nn.Linear(dim_cond, dim * 2) if self.cond else None
+
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(dim)) if scale else None
 
-    def forward(self, x):
+    def forward(self, x, cond = None):
         gamma = default(self.gamma, 1)
-        return F.normalize(x, dim = -1) * self.scale * gamma
+        out = F.normalize(x, dim = -1) * self.scale * gamma
 
-class Transformer(nn.Module):
+        if not self.cond:
+            return out
+
+        assert exists(cond)
+        gamma, beta = self.to_gamma_beta(cond).chunk(2, dim = -1)
+        gamma, beta = map(lambda t: rearrange(t, 'b d -> b 1 d'), (gamma, beta))
+        return out * gamma + beta
+
+class ConditionableTransformer(nn.Module):
     def __init__(
         self,
         dim,
@@ -234,26 +474,26 @@ class Transformer(nn.Module):
         heads = 8,
         ff_mult = 4,
         ff_causal_conv = False,
-        dim_time_mult = None,
+        dim_cond_mult = None,
+        cross_attn = False,
         use_flash = False
     ):
         super().__init__()
         self.dim = dim
         self.layers = mlist([])
 
-        cond_time = exists(dim_time_mult)
+        cond = exists(dim_cond_mult)
 
-        self.to_time_cond = None
-        self.cond_time = cond_time
-
-        if cond_time:
-            self.to_time_cond = nn.Linear(dim * dim_time_mult, dim * 4)
+        maybe_adaptive_norm_kwargs = dict(scale = not cond, dim_cond = dim * dim_cond_mult) if cond else dict()
+        rmsnorm = partial(RMSNorm, **maybe_adaptive_norm_kwargs)
 
         for _ in range(depth):
             self.layers.append(mlist([
-                RMSNorm(dim, scale = not cond_time),
+                rmsnorm(dim),
                 Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash = use_flash),
-                RMSNorm(dim, scale = not cond_time),
+                rmsnorm(dim) if cross_attn else None,
+                Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash = use_flash) if cross_attn else None,
+                rmsnorm(dim),
                 FeedForward(dim = dim, mult = ff_mult, causal_conv = ff_causal_conv)
             ]))
 
@@ -265,34 +505,31 @@ class Transformer(nn.Module):
     def forward(
         self,
         x,
-        times = None
+        times = None,
+        context = None
     ):
-        if self.cond_time:
-            assert exists(times)
-            t = self.to_time_cond(times)
-            t = rearrange(t, 'b d -> b 1 d')
-            t_attn_gamma, t_attn_beta, t_ff_gamma, t_ff_beta = t.chunk(4, dim = -1)
+        t = times
 
-        for attn_norm, attn, ff_norm, ff in self.layers:
+        for attn_norm, attn, cross_attn_norm, cross_attn, ff_norm, ff in self.layers:
             res = x
-            x = attn_norm(x)
-
-            if self.cond_time:
-                x = x * t_attn_gamma + t_attn_beta
-
+            x = attn_norm(x, cond = t)
             x = attn(x) + res
 
+            if exists(cross_attn):
+                assert exists(context)
+                res = x
+                x = cross_attn_norm(x, cond = t)
+                x = cross_attn(x, context = context) + res
+
             res = x
-            x = ff_norm(x)
-
-            if self.cond_time:
-                x = x * t_ff_gamma + t_ff_beta
-
+            x = ff_norm(x, cond = t)
             x = ff(x) + res
 
         return self.to_pred(x)
 
 class Model(nn.Module):
+
+    @beartype
     def __init__(
         self,
         dim,
@@ -303,15 +540,20 @@ class Model(nn.Module):
         ff_mult = 4,
         wavenet_layers = 8,
         wavenet_stacks = 4,
-        dim_time_mult = 4,
-        use_flash_attn = True
+        dim_cond_mult = 4,
+        use_flash_attn = True,
+        speech_prompt_encoder: Optional[SpeechPromptEncoder] = None,
+        dim_prompt = None,
+        num_latents_m = 32,   # number of latents to be perceiver resampled ('q-k-v' with 'm' queries in the paper)
+        resampler_depth = 2,
+        cond_drop_prob = 0.
     ):
         super().__init__()
         self.dim = dim
 
         # time condition
 
-        dim_time = dim * dim_time_mult
+        dim_time = dim * dim_cond_mult
 
         self.to_time_cond = Sequential(
             LearnedSinusoidalPosEmb(dim),
@@ -319,40 +561,130 @@ class Model(nn.Module):
             nn.SiLU()
         )
 
+        # prompt condition
+
+        condition_on_prompt = exists(speech_prompt_encoder)
+
+        self.cond_drop_prob = cond_drop_prob # for classifier free guidance
+        self.condition_on_prompt = condition_on_prompt
+        self.to_prompt_cond = None
+
+        if self.condition_on_prompt:
+            dim_prompt = default(dim_prompt, speech_prompt_encoder.dim_out)
+
+            self.speech_prompt_encoder = speech_prompt_encoder
+            assert speech_prompt_encoder.dim_out == dim_prompt
+
+            self.null_prompt_cond = nn.Parameter(torch.randn(dim_time))
+            self.null_prompt_tokens = nn.Parameter(torch.randn(num_latents_m, dim))
+
+            nn.init.normal_(self.null_prompt_cond, std = 0.02)
+            nn.init.normal_(self.null_prompt_tokens, std = 0.02)
+
+            self.to_prompt_cond = Sequential(
+                Reduce('b n d -> b d', 'mean'),
+                nn.Linear(dim_prompt, dim_time),
+                nn.SiLU()
+            )
+
+            self.perceiver_resampler = PerceiverResampler(
+                dim = dim,
+                dim_context = dim_prompt,
+                num_latents = num_latents_m,
+                depth = resampler_depth,
+                dim_head = dim_head,
+                heads = heads,
+                use_flash_attn = use_flash_attn
+            )
+
+        # conditioning includes time and optionally prompt
+
+        dim_cond_mult = dim_cond_mult * (2 if condition_on_prompt else 1)
+
         # wavenet
 
         self.wavenet = Wavenet(
             dim = dim,
             stacks = wavenet_stacks,
             layers = wavenet_layers,
-            dim_time_mult = dim_time_mult
+            dim_cond_mult = dim_cond_mult
         )
 
         # transformer
 
-        self.transformer = Transformer(
+        self.transformer = ConditionableTransformer(
             dim = dim,
             depth = depth,
             dim_head = dim_head,
             heads = heads,
             ff_mult = ff_mult,
             ff_causal_conv = True,
-            dim_time_mult = dim_time_mult,
+            dim_cond_mult = dim_cond_mult,
             use_flash = use_flash_attn,
+            cross_attn = condition_on_prompt
         )
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    def forward_with_cond_scale(
+        self,
+        *args,
+        cond_scale = 1.,
+        **kwargs
+    ):
+        logits = self.forward(*args, cond_drop_prob = 0., **kwargs)
+
+        if cond_scale == 1.:
+            return logits
+
+        null_logits = self.forward(*args, cond_drop_prob = 1., **kwargs)
+
+        return null_logits + (logits - null_logits) * cond_scale
 
     def forward(
         self,
         x,
-        times
+        times,
+        prompt = None,
+        cond_drop_prob = None
     ):
+        b = x.shape[0]
+        cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
+
+        drop_mask = prob_mask_like((b,), cond_drop_prob, self.device)
+
         t = self.to_time_cond(times)
+        c = None
+
+        if exists(self.to_prompt_cond):
+            assert exists(prompt)
+            encoded_prompt = self.speech_prompt_encoder(prompt)
+
+            prompt_cond = self.to_prompt_cond(encoded_prompt)
+
+            prompt_cond = torch.where(
+                rearrange(drop_mask, 'b -> b 1'),
+                self.null_prompt_cond,
+                prompt_cond,
+            )
+
+            t = torch.cat((t, prompt_cond), dim = -1)
+
+            resampled_prompt_tokens = self.perceiver_resampler(encoded_prompt)
+
+            c = torch.where(
+                rearrange(drop_mask, 'b -> b 1 1'),
+                self.null_prompt_tokens,
+                resampled_prompt_tokens
+            )
 
         x = rearrange(x, 'b n d -> b d n')
         x = self.wavenet(x, t)
         x = rearrange(x, 'b d n -> b n d')
 
-        x = self.transformer(x, t)
+        x = self.transformer(x, t, context = c)
         return x
 
 # feedforward
@@ -387,38 +719,88 @@ class Attention(nn.Module):
         self,
         dim,
         *,
+        dim_context = None,
         causal = False,
         dim_head = 64,
         heads = 8,
         dropout = 0.,
-        use_flash = False
+        use_flash = False,
+        cross_attn_include_queries = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
         self.heads = heads
+        self.cross_attn_include_queries = cross_attn_include_queries
 
         dim_inner = dim_head * heads
+        dim_context = default(dim_context, dim)
 
         self.attend = Attend(causal = causal, dropout = dropout, use_flash = use_flash)
-        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
+        self.to_q = nn.Linear(dim, dim_inner, bias = False)
+        self.to_kv = nn.Linear(dim_context, dim_inner * 2, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
 
-    def forward(self, x):
-        h = self.heads
+    def forward(self, x, context = None):
+        h, has_context = self.heads, exists(context)
 
-        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        context = default(context, x)
+
+        if has_context and self.cross_attn_include_queries:
+            context = torch.cat((x, context), dim = -2)
+
+        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim = -1))
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
-        q = q * self.scale
-
-        sim = einsum('b h i d, b h j d -> b h i j', q, k)
-
-        attn = sim.softmax(dim = -1)
-
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
+        out = self.attend(q, k, v)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
+
+# transformer encoder
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        depth,
+        causal = False,
+        dim_head = 64,
+        heads = 8,
+        use_flash = False,
+        dropout = 0.,
+        ff_mult = 4,
+        final_norm = False
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                RMSNorm(dim),
+                Attention(
+                    dim,
+                    causal = causal,
+                    dim_head = dim_head,
+                    heads = heads,
+                    dropout = dropout,
+                    use_flash = use_flash
+                ),
+                RMSNorm(dim),
+                FeedForward(
+                    dim,
+                    mult = ff_mult
+                )
+            ]))
+
+        self.norm = RMSNorm(dim) if final_norm else nn.Identity()
+
+    def forward(self, x):
+        for attn_norm, attn, ff_norm, ff in self.layers:
+            x = attn(attn_norm(x)) + x
+            x = ff(ff_norm(x)) + x
+
+        return self.norm(x)
 
 # tensor helper functions
 
@@ -558,7 +940,7 @@ class NaturalSpeech2(nn.Module):
         return times
 
     @torch.no_grad()
-    def ddpm_sample(self, shape, time_difference = None):
+    def ddpm_sample(self, shape, prompt = None, time_difference = None, cond_scale = 1.):
         batch, device = shape[0], self.device
 
         time_difference = default(time_difference, self.time_difference)
@@ -580,7 +962,7 @@ class NaturalSpeech2(nn.Module):
 
             # get predicted x0
 
-            model_output = self.model(audio, noise_cond)
+            model_output = self.model.forward_with_cond_scale(audio, noise_cond, prompt = prompt, cond_scale = cond_scale)
 
             # get log(snr)
 
@@ -627,7 +1009,7 @@ class NaturalSpeech2(nn.Module):
         return audio
 
     @torch.no_grad()
-    def ddim_sample(self, shape, time_difference = None):
+    def ddim_sample(self, shape, prompt = None, time_difference = None, cond_scale = 1.):
         batch, device = shape[0], self.device
 
         time_difference = default(time_difference, self.time_difference)
@@ -657,7 +1039,7 @@ class NaturalSpeech2(nn.Module):
 
             # predict x0
 
-            model_output = self.model(audio, times)
+            model_output = self.model.forward_with_cond_scale(audio, times, prompt = prompt, cond_scale = cond_scale)
 
             # calculate x0 and noise
 
@@ -680,15 +1062,39 @@ class NaturalSpeech2(nn.Module):
 
         return audio
 
+    def process_prompt(self, prompt = None):
+        if not exists(prompt):
+            return None
+
+        assert self.model.condition_on_prompt
+
+        is_raw_prompt = prompt.ndim == 2
+        assert not (is_raw_prompt and not exists(self.codec)), 'codec must be passed in if one were to train on raw prompt'
+
+        if is_raw_prompt:
+            with torch.no_grad():
+                self.codec.eval()
+                prompt, _, _ = self.codec(prompt, curtail_from_left = True, return_encoded = True)
+
+        return prompt
+
     @torch.no_grad()
     def sample(
         self,
         *,
         length,
-        batch_size = 1
+        prompt = None,
+        batch_size = 1,
+        cond_scale = 1.
     ):
         sample_fn = self.ddpm_sample if not self.use_ddim else self.ddim_sample
-        audio = sample_fn((batch_size, length, self.dim))
+
+        prompt = self.process_prompt(prompt)
+
+        if exists(prompt):
+            batch_size = prompt.shape[0]
+
+        audio = sample_fn((batch_size, length, self.dim), prompt = prompt, cond_scale = cond_scale)
 
         if exists(self.codec):
             audio = self.codec.decode(audio)
@@ -702,6 +1108,7 @@ class NaturalSpeech2(nn.Module):
         self,
         audio,
         codes = None,
+        prompt = None,
         *args,
         **kwargs
     ):
@@ -713,6 +1120,8 @@ class NaturalSpeech2(nn.Module):
             with torch.no_grad():
                 self.codec.eval()
                 audio, codes, _ = self.codec(audio, return_encoded = True)
+
+        prompt = self.process_prompt(prompt)
 
         batch, n, d, device = *audio.shape, self.device
 
@@ -734,7 +1143,7 @@ class NaturalSpeech2(nn.Module):
 
         # predict and take gradient step
 
-        pred = self.model(noised_audio, times)
+        pred = self.model(noised_audio, times, prompt = prompt)
 
         if self.objective == 'eps':
             target = noise
@@ -1001,7 +1410,7 @@ class Trainer(object):
                 if accelerator.is_main_process:
                     self.ema.update()
 
-                    if True or self.step % self.save_and_sample_every == 0:
+                    if self.step % self.save_and_sample_every == 0:
 
                         models = [(self.unwrapped_model, str(self.step))]
 

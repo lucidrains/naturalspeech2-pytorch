@@ -1,4 +1,6 @@
-<img src="./naturalspeech2.png" width="450px"></img>
+<img src="./diagram.png" width="450px"></img>
+
+<img src="./diagram2.png" width="450px"></img>
 
 ## Natural Speech 2 - Pytorch (wip)
 
@@ -14,6 +16,8 @@ NaturalSpeech 2 is a TTS system that leverages a neural audio codec with continu
 
 - <a href="https://github.com/manmay-nakhashi">Manmay</a> for submitting the initial code for phoneme, pitch, duration, and speech prompt encoders!
 
+- You? If you are an aspiring ML / AI engineer or work in the TTS field and would like to contribute to open sourcing state-of-the-art, jump right in!
+
 ## Install
 
 ```bash
@@ -26,7 +30,7 @@ $ pip install naturalspeech2-pytorch
 import torch
 from naturalspeech2_pytorch import (
     EncodecWrapper,
-    Transformer,
+    Model,
     NaturalSpeech2
 )
 
@@ -61,6 +65,57 @@ generated_audio = diffusion.sample(length = 1024) # (1, 327680)
 
 ```
 
+To accept prompting, you will need to instantiate `SpeechPromptEncoder` and pass it into `speech_prompt_encoder` on the `Model`
+
+ex.
+
+```python
+import torch
+from naturalspeech2_pytorch import (
+    EncodecWrapper,
+    Model,
+    NaturalSpeech2,
+    SpeechPromptEncoder
+)
+
+# use encodec as an example
+
+codec = EncodecWrapper()
+
+prompt_encoder = SpeechPromptEncoder(
+    dim_codebook = codec.codebook_dim,
+    depth = 2
+)
+
+model = Model(
+    dim = 128,
+    depth = 6,
+    speech_prompt_encoder = prompt_encoder,  # pass in the SpeechPromptEncoder
+    cond_drop_prob = 0.25                    # dropout prompt conditioning with this probability, for classifier free guidance
+)
+
+# natural speech diffusion model
+
+diffusion = NaturalSpeech2(
+    model = model,
+    codec = codec,
+    timesteps = 1000
+).cuda()
+
+# mock raw audio data
+
+raw_audio = torch.randn(4, 327680).cuda()
+prompt = torch.randn(4, 32768).cuda()          # they randomly excised a range on the audio for the prompt during training, eventually will take care of this auto-magically
+
+loss = diffusion(raw_audio, prompt = prompt) # pass in the prompt
+loss.backward()
+
+# do the above in a loop for a lot of raw audio data...
+# then you can sample from your generative model as so
+
+generated_audio = diffusion.sample(length = 1024, prompt = prompt, cond_scale = 3.) # pass in your prompt - classifier free guidance scale of 3 (1 would be no classifier free guidance)
+```
+
 Or if you want a `Trainer` class to take care of the training and sampling loop, just simply do
 
 ```python
@@ -75,6 +130,16 @@ trainer = Trainer(
 
 trainer.train()
 ```
+
+## Todo
+
+- [x] complete perceiver then cross attention conditioning on ddpm side
+- [x] add classifier free guidance, even if not in paper
+
+- [ ] add self-conditioning on ddpm side
+- [ ] complete duration / pitch prediction during training
+- [ ] take care of automatic slicing of audio for prompt, being aware of minimal audio segment as allowed by the codec model
+- [ ] make sure curtail_from_left works for encodec, figure out what they are doing
 
 ## Citations
 
@@ -119,5 +184,15 @@ trainer.train()
     title   = {Efficient Diffusion Training via Min-SNR Weighting Strategy},
     author  = {Tiankai Hang and Shuyang Gu and Chen Li and Jianmin Bao and Dong Chen and Han Hu and Xin Geng and Baining Guo},
     year    = {2023}
+}
+```
+
+```bibtex
+@article{Alayrac2022FlamingoAV,
+    title   = {Flamingo: a Visual Language Model for Few-Shot Learning},
+    author  = {Jean-Baptiste Alayrac and Jeff Donahue and Pauline Luc and Antoine Miech and Iain Barr and Yana Hasson and Karel Lenc and Arthur Mensch and Katie Millican and Malcolm Reynolds and Roman Ring and Eliza Rutherford and Serkan Cabi and Tengda Han and Zhitao Gong and Sina Samangooei and Marianne Monteiro and Jacob Menick and Sebastian Borgeaud and Andy Brock and Aida Nematzadeh and Sahand Sharifzadeh and Mikolaj Binkowski and Ricardo Barreira and Oriol Vinyals and Andrew Zisserman and Karen Simonyan},
+    journal  = {ArXiv},
+    year     = {2022},
+    volume   = {abs/2204.14198}
 }
 ```

@@ -10,7 +10,10 @@ from naturalspeech2_pytorch.naturalspeech2_pytorch import (
     Transformer,
     Wavenet,
     Model,
-    Trainer
+    Trainer,
+    PhonemeEncoder,
+    DurationPitchPredictor,
+    SpeechPromptEncoder
 )
 
 from audiolm_pytorch import (

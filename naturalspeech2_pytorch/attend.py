@@ -80,8 +80,11 @@ class Attend(nn.Module):
         # Recommended for multi-query single-key-value attention by Tri Dao
         # kv shape torch.Size([1, 512, 64]) -> torch.Size([1, 8, 512, 64])
 
-        k = rearrange(k, 'b ... -> b 1 ...').expand_as(q)
-        v = rearrange(v, 'b ... -> b 1 ...').expand_as(q)
+        if k.ndim == 3:
+            k = rearrange(k, 'b ... -> b 1 ...').expand_as(q)
+
+        if v.ndim == 3:
+            v = rearrange(v, 'b ... -> b 1 ...').expand_as(q)
 
         # Check if mask exists and expand to compatible shape
         # The mask is B L, so it would have to be expanded to B H N L
@@ -122,9 +125,11 @@ class Attend(nn.Module):
         if self.use_flash:
             return self.flash_attn(q, k, v, mask = mask)
 
+        kv_einsum_eq = 'b j d' if k.ndim == 3 else 'b h j d'
+
         # similarity
 
-        sim = einsum("b h i d, b j d -> b h i j", q, k) * scale
+        sim = einsum(f"b h i d, {kv_einsum_eq} -> b h i j", q, k) * scale
 
         # key padding mask
 
@@ -145,6 +150,6 @@ class Attend(nn.Module):
 
         # aggregate values
 
-        out = einsum("b h i j, b j d -> b h i d", attn, v)
+        out = einsum(f"b h i j, {kv_einsum_eq} -> b h i d", attn, v)
 
         return out
