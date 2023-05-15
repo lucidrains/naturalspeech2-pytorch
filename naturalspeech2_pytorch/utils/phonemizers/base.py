@@ -2,7 +2,7 @@
 import abc
 from typing import List, Tuple
 
-from utils.phonemizers.punctuation import Punctuation
+from naturalspeech2_pytorch.utils.phonemizers.punctuation import Punctuation
 
 
 class BasePhonemizer(abc.ABC):

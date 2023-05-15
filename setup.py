@@ -11,6 +11,7 @@ setup(
   author = 'Phil Wang',
   author_email = 'lucidrains@gmail.com',
   long_description_content_type = 'text/markdown',
+  include_package_data = True,
   url = 'https://github.com/lucidrains/naturalspeech2-pytorch',
   keywords = [
     'artificial intelligence',
@@ -24,13 +25,12 @@ setup(
     'beartype',
     'einops>=0.6.1',
     'ema-pytorch',
-    'local-attention',
-    'torch>=1.6',
-    'tqdm',
-    'num2words',
     'indic-num2words',
     'inflect',
-    're'
+    'local-attention',
+    'num2words',
+    'torch>=1.6',
+    'tqdm',
     'vector-quantize-pytorch>=1.4.1'
   ],
   classifiers=[

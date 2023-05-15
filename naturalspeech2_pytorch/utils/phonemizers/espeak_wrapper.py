@@ -6,8 +6,8 @@ from typing import Dict, List
 
 from packaging.version import Version
 
-from phonemizers.base import BasePhonemizer
-from phonemizers.punctuation import Punctuation
+from naturalspeech2_pytorch.utils.phonemizers.base import BasePhonemizer
+from naturalspeech2_pytorch.utils.phonemizers.punctuation import Punctuation
 
 
 

@@ -23,6 +23,7 @@ from beartype import beartype
 from beartype.typing import Tuple, Union, Optional
 
 from naturalspeech2_pytorch.attend import Attend
+from naturalspeech2_pytorch.utils.tokenizer import Tokenizer
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
@@ -853,6 +854,7 @@ class NaturalSpeech2(nn.Module):
         model: Model,
         codec: Optional[Union[SoundStream, EncodecWrapper]] = None,
         *,
+        tokenizer: Optional[Tokenizer] = None,
         target_sample_hz = None,
         timesteps = 1000,
         use_ddim = True,

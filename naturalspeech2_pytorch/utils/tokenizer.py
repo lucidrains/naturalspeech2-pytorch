@@ -1,17 +1,24 @@
-from typing import Callable, List
+from typing import Callable, List, Optional
 
-from utils.cleaner import TextProcessor
-from utils.phonemizers.espeak_wrapper import ESpeak
+from naturalspeech2_pytorch.utils.cleaner import TextProcessor
+from naturalspeech2_pytorch.utils.phonemizers.espeak_wrapper import ESpeak
+
+def exists(val):
+    return val is not None
+
+def default(val, d):
+    return val if exists(val) else d
+
 class Tokenizer:
     def __init__(
         self,
         vocab,
-        text_cleaner: Callable = None,
-        phonemizer: Callable = None,
+        text_cleaner: Optional[Callable] = None,
+        phonemizer: Optional[Callable] = None,
         add_blank: bool = False,
-        use_eos_bos=False,
+        use_eos_bos = False,
     ):
-        self.text_cleaner = text_cleaner
+        self.text_cleaner = default(text_cleaner, TextProcessor().phoneme_cleaners)
         self.add_blank = add_blank
         self.use_eos_bos = use_eos_bos
         self.vocab = vocab
@@ -89,6 +96,7 @@ class Tokenizer:
         result = [char_to_use] * (len(char_sequence) * 2 + 1)
         result[1::2] = char_sequence
         return result
+
 if __name__ == "__main__":
     #DEFAULT SET OF IPA PHONEMES
     # Phonemes definition (All IPA characters)
