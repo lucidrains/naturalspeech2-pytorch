@@ -27,6 +27,10 @@ setup(
     'local-attention',
     'torch>=1.6',
     'tqdm',
+    'num2words',
+    'indic-num2words',
+    'inflect',
+    're'
     'vector-quantize-pytorch>=1.4.1'
   ],
   classifiers=[
