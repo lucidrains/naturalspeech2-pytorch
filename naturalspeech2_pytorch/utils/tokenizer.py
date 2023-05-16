@@ -3,29 +3,61 @@ from typing import Callable, List, Optional
 from naturalspeech2_pytorch.utils.cleaner import TextProcessor
 from naturalspeech2_pytorch.utils.phonemizers.espeak_wrapper import ESpeak
 
+# default phoneme set
+
+_vowels = "iyɨʉɯuɪʏʊeøɘəɵɤoɛœɜɞʌɔæɐaɶɑɒᵻ"
+_non_pulmonic_consonants = "ʘɓǀɗǃʄǂɠǁʛ"
+_pulmonic_consonants = "pbtdʈɖcɟkɡqɢʔɴŋɲɳnɱmʙrʀⱱɾɽɸβfvθðszʃʒʂʐçʝxɣχʁħʕhɦɬɮʋɹɻjɰlɭʎʟ"
+_suprasegmentals = "'̃ˈˌːˑ. ,-"
+_other_symbols = "ʍwɥʜʢʡɕʑɺɧʲ"
+_diacrilics = "ɚ˞ɫ"
+_phonemes = _vowels + _non_pulmonic_consonants + _pulmonic_consonants + _suprasegmentals + _other_symbols + _diacrilics
+
+# default map
+
+LANGUAGE_MAP = {
+    'en-us': 'en',
+    'fr-fr': 'es',
+    'hi': 'hi'
+}
+
+# functions
+
 def exists(val):
     return val is not None
 
 def default(val, d):
     return val if exists(val) else d
 
+# main class
+
 class Tokenizer:
     def __init__(
         self,
-        vocab,
+        vocab = _phonemes,
         text_cleaner: Optional[Callable] = None,
         phonemizer: Optional[Callable] = None,
+        default_lang = "en-us",
         add_blank: bool = False,
         use_eos_bos = False,
     ):
         self.text_cleaner = default(text_cleaner, TextProcessor().phoneme_cleaners)
         self.add_blank = add_blank
         self.use_eos_bos = use_eos_bos
+
         self.vocab = vocab
+        self.vocab_size = len(vocab)
+
         self.char_to_id = {char: idx for idx, char in enumerate(self.vocab)}
         self.id_to_char = {idx: char for idx, char in enumerate(self.vocab)}
+
         self.phonemizer = phonemizer
+        if not exists(self.phonemizer):
+            self.phonemizer = ESpeak(language = default_lang)
+
+        self.language = self.phonemizer.language
         self.not_found_characters = []
+
     def encode(self, text: str) -> List[int]:
         """Encodes a string of text as a sequence of IDs."""
         token_ids = []
@@ -68,6 +100,8 @@ class Tokenizer:
         5. Text to token IDs
         """
         # TODO: text cleaner should pick the right routine based on the language
+        language = default(language, LANGUAGE_MAP[self.language])
+
         cleaned_text = None
         if self.text_cleaner is not None:
             text = self.text_cleaner(text, language=language)
@@ -98,15 +132,6 @@ class Tokenizer:
         return result
 
 if __name__ == "__main__":
-    #DEFAULT SET OF IPA PHONEMES
-    # Phonemes definition (All IPA characters)
-    _vowels = "iyɨʉɯuɪʏʊeøɘəɵɤoɛœɜɞʌɔæɐaɶɑɒᵻ"
-    _non_pulmonic_consonants = "ʘɓǀɗǃʄǂɠǁʛ"
-    _pulmonic_consonants = "pbtdʈɖcɟkɡqɢʔɴŋɲɳnɱmʙrʀⱱɾɽɸβfvθðszʃʒʂʐçʝxɣχʁħʕhɦɬɮʋɹɻjɰlɭʎʟ"
-    _suprasegmentals = "'̃ˈˌːˑ. ,-"
-    _other_symbols = "ʍwɥʜʢʡɕʑɺɧʲ"
-    _diacrilics = "ɚ˞ɫ"
-    _phonemes = _vowels + _non_pulmonic_consonants + _pulmonic_consonants + _suprasegmentals + _other_symbols + _diacrilics
     txt_cleaner = TextProcessor()
     tokenizer = Tokenizer(vocab = _phonemes, text_cleaner = txt_cleaner.phoneme_cleaners, phonemizer = ESpeak(language="en-us"))
     print(tokenizer.text_to_ids("Hello, Mr. Example, this is 9:30 am and  my number is 30.", language="en"))

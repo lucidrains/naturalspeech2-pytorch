@@ -23,7 +23,7 @@ from beartype import beartype
 from beartype.typing import Tuple, Union, Optional
 
 from naturalspeech2_pytorch.attend import Attend
-from naturalspeech2_pytorch.utils.tokenizer import Tokenizer
+from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
@@ -86,6 +86,8 @@ class LearnedSinusoidalPosEmb(nn.Module):
 class PhonemeEncoder(nn.Module):
     def __init__(
         self,
+        *,
+        num_tokens = None,
         dim = 512,
         dim_hidden = 1024,
         kernel_size = 9,
@@ -97,6 +99,8 @@ class PhonemeEncoder(nn.Module):
         use_flash = False
     ):
         super().__init__()
+
+        self.token_emb = nn.Embedding(num_tokens, dim) if exists(num_tokens) else nn.Identity()
 
         same_padding = (kernel_size - 1) // 2
 
@@ -118,6 +122,7 @@ class PhonemeEncoder(nn.Module):
         )
 
     def forward(self, x):
+        x = self.token_emb(x)
         x = self.conv(x)
         x = self.transformer(x)
         return x
