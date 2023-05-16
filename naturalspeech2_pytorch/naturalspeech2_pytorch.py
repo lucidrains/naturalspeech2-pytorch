@@ -103,7 +103,7 @@ class PhonemeEncoder(nn.Module):
         super().__init__()
 
         self.tokenizer = tokenizer
-        num_tokens = default(num_tokens, tokenizer.vocab_size)
+        num_tokens = default(num_tokens, tokenizer.vocab_size if exists(tokenizer) else None)
 
         self.token_emb = nn.Embedding(num_tokens + 1, dim) if exists(num_tokens) else nn.Identity()
         self.pad_id = num_tokens
@@ -206,7 +206,8 @@ class DurationPitchPredictor(nn.Module):
         self,
         *,
         dim,
-        num_phoneme_tokens,
+        num_phoneme_tokens = None,
+        tokenizer: Optional[Tokenizer] = None,
         dim_encoded_prompts = None,
         depth = 30,
         kernel_size = 3,
@@ -217,9 +218,12 @@ class DurationPitchPredictor(nn.Module):
         use_flash_attn = False
     ):
         super().__init__()
+        self.tokenizer = tokenizer
+        num_phoneme_tokens = default(num_phoneme_tokens, tokenizer.vocab_size if exists(tokenizer) else None)
+
         dim_encoded_prompts = default(dim_encoded_prompts, dim)
 
-        self.phoneme_token_emb = nn.Embedding(num_phoneme_tokens, dim)
+        self.phoneme_token_emb = nn.Embedding(num_phoneme_tokens, dim) if exists(num_phoneme_tokens) else nn.Identity()
 
         self.layers = nn.ModuleList([])
 
@@ -249,13 +253,18 @@ class DurationPitchPredictor(nn.Module):
             nn.ReLU()
         )
 
+    @beartype
     def forward(
         self,
-        x,
+        x: Union[Tensor, List[str]],
         encoded_prompts,
         duration = None,
         pitch = None
     ):
+        if is_bearable(x, List[str]):
+            assert exists(self.tokenizer)
+            x = self.tokenizer.texts_to_tensor_ids(x)
+
         x = self.phoneme_token_emb(x)
 
         for conv, norm, attn in self.layers:
