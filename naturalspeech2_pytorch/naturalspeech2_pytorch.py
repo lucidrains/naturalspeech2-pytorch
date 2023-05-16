@@ -258,6 +258,7 @@ class DurationPitchPredictor(nn.Module):
         self,
         x: Union[Tensor, List[str]],
         encoded_prompts,
+        prompt_mask = None,
         duration = None,
         pitch = None
     ):
@@ -269,7 +270,7 @@ class DurationPitchPredictor(nn.Module):
 
         for conv, norm, attn in self.layers:
             x = conv(x)
-            x = attn(norm(x), encoded_prompts) + x
+            x = attn(norm(x), encoded_prompts, mask = prompt_mask) + x
 
         duration_pred, pitch_pred = self.to_pred(x).unbind(dim = -1)
 
@@ -317,7 +318,7 @@ class PerceiverResampler(nn.Module):
 
         self.norm = RMSNorm(dim)
 
-    def forward(self, x):
+    def forward(self, x, mask = None):
         batch = x.shape[0]
 
         x = self.proj_context(x)
@@ -325,7 +326,7 @@ class PerceiverResampler(nn.Module):
         latents = repeat(self.latents, 'n d -> b n d', b = batch)
 
         for attn, ff in self.layers:
-            latents = attn(latents, x) + latents
+            latents = attn(latents, x, mask = mask) + latents
             latents = ff(latents) + latents
 
         return self.norm(latents)
@@ -681,6 +682,7 @@ class Model(nn.Module):
         x,
         times,
         prompt = None,
+        prompt_mask = None,
         cond_drop_prob = None
     ):
         b = x.shape[0]
@@ -705,7 +707,7 @@ class Model(nn.Module):
 
             t = torch.cat((t, prompt_cond), dim = -1)
 
-            resampled_prompt_tokens = self.perceiver_resampler(encoded_prompt)
+            resampled_prompt_tokens = self.perceiver_resampler(encoded_prompt, mask = prompt_mask)
 
             c = torch.where(
                 rearrange(drop_mask, 'b -> b 1 1'),
