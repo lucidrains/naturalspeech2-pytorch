@@ -40,10 +40,12 @@ class Tokenizer:
         default_lang = "en-us",
         add_blank: bool = False,
         use_eos_bos = False,
+        pad_id = -1
     ):
         self.text_cleaner = default(text_cleaner, TextProcessor().phoneme_cleaners)
         self.add_blank = add_blank
         self.use_eos_bos = use_eos_bos
+        self.pad_id = pad_id
 
         self.vocab = vocab
         self.vocab_size = len(vocab)

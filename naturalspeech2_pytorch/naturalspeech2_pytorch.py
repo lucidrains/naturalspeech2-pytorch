@@ -100,13 +100,14 @@ class PhonemeEncoder(nn.Module):
     ):
         super().__init__()
 
-        self.token_emb = nn.Embedding(num_tokens, dim) if exists(num_tokens) else nn.Identity()
+        self.token_emb = nn.Embedding(num_tokens + 1, dim) if exists(num_tokens) else nn.Identity()
+        self.pad_id = num_tokens
 
         same_padding = (kernel_size - 1) // 2
 
         self.conv = nn.Sequential(
             Rearrange('b n c -> b c n'),
-            nn.Conv1d(dim, dim_hidden, kernel_size, padding = same_padding),
+            CausalConv1d(dim, dim_hidden, kernel_size),
             nn.SiLU(),
             nn.Dropout(conv_dropout),
             Rearrange('b c n -> b n c'),
@@ -121,10 +122,13 @@ class PhonemeEncoder(nn.Module):
             use_flash = use_flash
         )
 
-    def forward(self, x):
+    def forward(self, x, mask = None):
+        is_padding = x < 0
+        x = x.masked_fill(is_padding, self.pad_id)
+
         x = self.token_emb(x)
         x = self.conv(x)
-        x = self.transformer(x)
+        x = self.transformer(x, mask = mask)
         return x
 
 class SpeechPromptEncoder(nn.Module):
@@ -746,7 +750,7 @@ class Attention(nn.Module):
         self.to_kv = nn.Linear(dim_context, dim_inner * 2, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
 
-    def forward(self, x, context = None):
+    def forward(self, x, context = None, mask = None):
         h, has_context = self.heads, exists(context)
 
         context = default(context, x)
@@ -757,7 +761,7 @@ class Attention(nn.Module):
         q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim = -1))
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
-        out = self.attend(q, k, v)
+        out = self.attend(q, k, v, mask = mask)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
@@ -801,9 +805,9 @@ class Transformer(nn.Module):
 
         self.norm = RMSNorm(dim) if final_norm else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, mask = None):
         for attn_norm, attn, ff_norm, ff in self.layers:
-            x = attn(attn_norm(x)) + x
+            x = attn(attn_norm(x), mask = mask) + x
             x = ff(ff_norm(x)) + x
 
         return self.norm(x)
