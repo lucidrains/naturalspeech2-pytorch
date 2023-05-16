@@ -1,4 +1,8 @@
-from typing import Callable, List, Optional
+import torch
+from torch import Tensor
+from typing import Callable, List, Optional, Tuple
+
+from torch.nn.utils.rnn import pad_sequence
 
 from naturalspeech2_pytorch.utils.cleaner import TextProcessor
 from naturalspeech2_pytorch.utils.phonemizers.espeak_wrapper import ESpeak
@@ -60,6 +64,10 @@ class Tokenizer:
         self.language = self.phonemizer.language
         self.not_found_characters = []
 
+    @property
+    def espeak_language(self):
+        return LANGUAGE_MAP.get(self.language, None)
+
     def encode(self, text: str) -> List[int]:
         """Encodes a string of text as a sequence of IDs."""
         token_ids = []
@@ -82,7 +90,11 @@ class Tokenizer:
             text += self.id_to_char[token_id]
         return text
 
-    def text_to_ids(self, text: str, language: str = None) -> List[int]:  # pylint: disable=unused-argument
+    def text_to_ids(
+        self,
+        text: str,
+        language: str = None
+    ) -> Tuple[List[int], str, str]:
         """Converts a string of text to a sequence of token IDs.
 
         Args:
@@ -101,8 +113,8 @@ class Tokenizer:
         4. Add BOS and EOS characters
         5. Text to token IDs
         """
-        # TODO: text cleaner should pick the right routine based on the language
-        language = default(language, LANGUAGE_MAP[self.language])
+
+        language = default(language, self.espeak_language)
 
         cleaned_text = None
         if self.text_cleaner is not None:
@@ -113,7 +125,17 @@ class Tokenizer:
             phonemized = self.intersperse_blank_char(phonemized, True)
         if self.use_eos_bos:
             phonemized = self.pad_with_bos_eos(phonemized)
+
         return self.encode(phonemized), cleaned_text, phonemized
+
+    def texts_to_tensor_ids(self, texts: List[str], language: str = None) -> Tensor:
+        all_ids = []
+
+        for text in texts:
+            ids, *_ = self.text_to_ids(text, language = language)
+            all_ids.append(torch.tensor(ids))
+
+        return pad_sequence(all_ids, batch_first = True, padding_value = self.pad_id)
 
     def ids_to_text(self, id_sequence: List[int]) -> str:
         """Converts a sequence of token IDs to a string of text."""

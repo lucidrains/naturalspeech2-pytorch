@@ -7,7 +7,7 @@ from collections import namedtuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn, einsum
+from torch import nn, einsum, Tensor
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 
@@ -20,7 +20,8 @@ from audiolm_pytorch import SoundStream, EncodecWrapper
 from audiolm_pytorch.data import SoundDataset, get_dataloader
 
 from beartype import beartype
-from beartype.typing import Tuple, Union, Optional
+from beartype.typing import Tuple, Union, Optional, List
+from beartype.door import is_bearable
 
 from naturalspeech2_pytorch.attend import Attend
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
@@ -87,6 +88,7 @@ class PhonemeEncoder(nn.Module):
     def __init__(
         self,
         *,
+        tokenizer: Optional[Tokenizer] = None,
         num_tokens = None,
         dim = 512,
         dim_hidden = 1024,
@@ -99,6 +101,9 @@ class PhonemeEncoder(nn.Module):
         use_flash = False
     ):
         super().__init__()
+
+        self.tokenizer = tokenizer
+        num_tokens = default(num_tokens, tokenizer.vocab_size)
 
         self.token_emb = nn.Embedding(num_tokens + 1, dim) if exists(num_tokens) else nn.Identity()
         self.pad_id = num_tokens
@@ -122,7 +127,16 @@ class PhonemeEncoder(nn.Module):
             use_flash = use_flash
         )
 
-    def forward(self, x, mask = None):
+    @beartype
+    def forward(
+        self,
+        x: Union[Tensor, List[str]],
+        mask = None
+    ):
+        if is_bearable(x, List[str]):
+            assert exists(self.tokenizer)
+            x = self.tokenizer.texts_to_tensor_ids(x)
+
         is_padding = x < 0
         x = x.masked_fill(is_padding, self.pad_id)
 
@@ -402,7 +416,7 @@ class WavenetStack(nn.Module):
         residuals = []
         skips = []
 
-        if isinstance(x, torch.Tensor):
+        if isinstance(x, Tensor):
             x = (x,) * len(self.blocks)
 
         for block_input, block in zip(x, self.blocks):
