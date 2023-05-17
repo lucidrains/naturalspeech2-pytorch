@@ -201,6 +201,59 @@ class SpeechPromptEncoder(nn.Module):
 
 # duration and pitch predictor seems to be the same
 
+class Block(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        kernel = 3,
+        groups = 8,
+        dropout = 0.
+    ):
+        super().__init__()
+        self.proj = nn.Conv1d(dim, dim_out, kernel, padding = kernel // 2)
+        self.norm = nn.GroupNorm(groups, dim_out)
+        self.act = nn.SiLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.proj(x)
+        x = self.norm(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        return x
+
+class ResnetBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        kernel,
+        *,
+        dropout = 0.,
+        groups = 8
+    ):
+        super().__init__()
+        self.block1 = Block(dim, dim_out, kernel, groups = groups, dropout = dropout)
+        self.block2 = Block(dim_out, dim_out, kernel, groups = groups, dropout = dropout)
+        self.res_conv = nn.Conv1d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+
+    def forward(self, x):
+        x = rearrange(x, 'b n c -> b c n')
+        h = self.block1(x)
+        h = self.block2(h)
+        out = h + self.res_conv(x)
+        return rearrange(out, 'b c n -> b n c')
+
+def ConvBlock(dim, dim_out, kernel, dropout = 0.):
+    return nn.Sequential(
+        Rearrange('b n c -> b c n'),
+        nn.Conv1d(dim, dim_out, kernel, padding = kernel // 2),
+        nn.SiLU(),
+        nn.Dropout(dropout),
+        Rearrange('b c n -> b n c'),
+    )
+
 class DurationPitchPredictor(nn.Module):
     def __init__(
         self,
@@ -210,6 +263,7 @@ class DurationPitchPredictor(nn.Module):
         tokenizer: Optional[Tokenizer] = None,
         dim_encoded_prompts = None,
         num_convolutions_per_block = 3,
+        use_resnet_block = True,
         depth = 10,
         kernel_size = 3,
         heads = 8,
@@ -228,16 +282,12 @@ class DurationPitchPredictor(nn.Module):
 
         self.layers = nn.ModuleList([])
 
+        conv_klass = ConvBlock if not use_resnet_block else ResnetBlock
+
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 nn.Sequential(*[
-                    nn.Sequential(
-                        Rearrange('b n c -> b c n'),
-                        nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding = kernel_size // 2),
-                        nn.SiLU(),
-                        nn.Dropout(dropout),
-                        Rearrange('b c n -> b n c'),
-                    ) for _ in range(num_convolutions_per_block)
+                    conv_klass(dim_hidden, dim_hidden, kernel_size) for _ in range(num_convolutions_per_block)
                 ]),
                 RMSNorm(dim),
                 Attention(
