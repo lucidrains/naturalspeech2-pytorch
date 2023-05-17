@@ -247,10 +247,11 @@ class DurationPitchPredictor(nn.Module):
                 RMSNorm(dim) if is_attn_layer else None,
                 Attention(
                     dim_hidden,
+                    dim_context = dim_encoded_prompts,
                     heads=heads,
                     dim_head=dim_head,
                     dropout=dropout,
-                    use_flash=True,
+                    use_flash=use_flash_attn,
                     cross_attn_include_queries=True
                 ) if is_attn_layer else None
             ]))
