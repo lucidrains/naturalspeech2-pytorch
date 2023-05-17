@@ -28,7 +28,7 @@ from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
-
+import pyreaper
 from tqdm.auto import tqdm
 
 # constants
@@ -81,6 +81,12 @@ class LearnedSinusoidalPosEmb(nn.Module):
         return fouriered
 
 # peripheral models
+# compute pitch
+def compute_pitch(y, sr):
+    #https://pytorch.org/audio/main/generated/torchaudio.functional.compute_kaldi_pitch.html#torchaudio.functional.compute_kaldi_pitch
+    pitch_feature = F.compute_kaldi_pitch(y, sr)
+    pitch, nfcc = pitch_feature[..., 0], pitch_feature[..., 1]
+    return pitch
 
 # phoneme - pitch - speech prompt - duration predictors
 
