@@ -239,7 +239,7 @@ class DurationPitchPredictor(nn.Module):
                 nn.Sequential(
                     Rearrange('b n c -> b c n'),
                     nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding=kernel_size // 2),
-                    nn.ReLU(),
+                    nn.SiLU(),
                     nn.LayerNorm(dim_hidden),
                     nn.Dropout(dropout),
                     Rearrange('b c n -> b n c'),
