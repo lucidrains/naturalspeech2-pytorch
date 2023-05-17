@@ -181,44 +181,40 @@ class SpeechPromptEncoder(nn.Module):
 class DurationPitchPredictor(nn.Module):
     def __init__(
         self,
-        *,
-        dim,
-        num_phoneme_tokens,
-        dim_encoded_prompts = None,
-        depth = 30,
-        kernel_size = 3,
-        heads = 8,
-        dim_head = 64,
-        dim_hidden = 512,
-        dropout = 0.2,
-        use_flash_attn = False
+        dim=512,
+        depth=30,
+        kernel_size=9,
+        heads=8,
+        dim_head=64,
+        dim_hidden=2048,
+        dropout=0.1,
+        attn_every=3,
+        dropout_attn=0.5
     ):
         super().__init__()
-        dim_encoded_prompts = default(dim_encoded_prompts, dim)
-
-        self.phoneme_token_emb = nn.Embedding(num_phoneme_tokens, dim)
 
         self.layers = nn.ModuleList([])
 
         for _ in range(depth):
+            is_attn_layer = _ % attn_every == 0
             self.layers.append(nn.ModuleList([
                 nn.Sequential(
                     Rearrange('b n c -> b c n'),
-                    nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding = kernel_size // 2),
-                    nn.SiLU(),
-                    nn.Dropout(dropout),
+                    nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding=kernel_size // 2),
+                    nn.ReLU(),
+                    nn.LayerNorm(dim_hidden),
+                    nn.Dropout(dropout_attn if is_attn_layer else dropout),
                     Rearrange('b c n -> b n c'),
                 ),
-                RMSNorm(dim),
+                RMSNorm(dim) if is_attn_layer else None,
                 Attention(
                     dim_hidden,
-                    dim_context = dim_encoded_prompts,
-                    heads = heads,
-                    dim_head = dim_head,
-                    dropout = dropout,
-                    use_flash = use_flash_attn,
-                    cross_attn_include_queries = True
-                )
+                    heads=heads,
+                    dim_head=dim_head,
+                    dropout=dropout,
+                    use_flash=True,
+                    cross_attn_include_queries=True
+                ) if is_attn_layer else None
             ]))
 
         self.to_pred = nn.Sequential(
@@ -230,19 +226,18 @@ class DurationPitchPredictor(nn.Module):
         self,
         x,
         encoded_prompts,
-        duration = None,
-        pitch = None
+        duration=None,
+        pitch=None
     ):
-        x = self.phoneme_token_emb(x)
-
         for conv, norm, attn in self.layers:
             x = conv(x)
-            x = attn(norm(x), encoded_prompts) + x
+            if attn is not None:
+                x = attn(norm(x), encoded_prompts) + x
 
-        duration_pred, pitch_pred = self.to_pred(x).unbind(dim = -1)
+        duration_pred, pitch_pred = self.to_pred(x).unbind(dim=-1)
 
-        duration_return = F.l1_loss(duration, duration_pred) if exists(duration) else duration_pred
-        pitch_return = F.l1_loss(pitch, pitch_pred) if exists(pitch) else pitch_pred
+        duration_return = F.l1_loss(duration, duration_pred) if duration is not None else duration_pred
+        pitch_return = F.l1_loss(pitch, pitch_pred) if pitch is not None else pitch_pred
 
         return duration_return, pitch_return
 
