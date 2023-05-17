@@ -210,17 +210,27 @@ class SpeechPromptEncoder(nn.Module):
 class DurationPitchPredictor(nn.Module):
     def __init__(
         self,
-        dim=512,
-        depth=30,
-        kernel_size=9,
-        heads=8,
-        dim_head=64,
-        dim_hidden=2048,
-        dropout=0.1,
-        attn_every=3,
-        dropout_attn=0.5
+        *,
+        dim,
+        num_phoneme_tokens = None,
+        tokenizer: Optional[Tokenizer] = None,
+        dim_encoded_prompts = None,
+        depth = 30,
+        kernel_size = 3,
+        heads = 8,
+        dim_head = 64,
+        dim_hidden = 512,
+        dropout = 0.2,
+        attn_every = 3,
+        use_flash_attn = False
     ):
         super().__init__()
+        self.tokenizer = tokenizer
+        num_phoneme_tokens = default(num_phoneme_tokens, tokenizer.vocab_size if exists(tokenizer) else None)
+
+        dim_encoded_prompts = default(dim_encoded_prompts, dim)
+
+        self.phoneme_token_emb = nn.Embedding(num_phoneme_tokens, dim) if exists(num_phoneme_tokens) else nn.Identity()
 
         self.layers = nn.ModuleList([])
 
@@ -232,7 +242,7 @@ class DurationPitchPredictor(nn.Module):
                     nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding=kernel_size // 2),
                     nn.ReLU(),
                     nn.LayerNorm(dim_hidden),
-                    nn.Dropout(dropout_attn if is_attn_layer else dropout),
+                    nn.Dropout(dropout),
                     Rearrange('b c n -> b n c'),
                 ),
                 RMSNorm(dim) if is_attn_layer else None,
@@ -256,18 +266,25 @@ class DurationPitchPredictor(nn.Module):
         self,
         x: Union[Tensor, List[str]],
         encoded_prompts,
-        duration=None,
-        pitch=None
+        prompt_mask = None,
+        duration = None,
+        pitch = None
     ):
+        if is_bearable(x, List[str]):
+            assert exists(self.tokenizer)
+            x = self.tokenizer.texts_to_tensor_ids(x)
+
+        x = self.phoneme_token_emb(x)
+
         for conv, norm, attn in self.layers:
             x = conv(x)
-            if attn is not None:
-                x = attn(norm(x), encoded_prompts) + x
+            x = attn(norm(x), encoded_prompts, mask = prompt_mask) + x
 
-        duration_pred, pitch_pred = self.to_pred(x).unbind(dim=-1)
+        duration_pred, pitch_pred = self.to_pred(x).unbind(dim = -1)
 
-        duration_return = F.l1_loss(duration, duration_pred) if duration is not None else duration_pred
-        pitch_return = F.l1_loss(pitch, pitch_pred) if pitch is not None else pitch_pred
+        duration_return = F.l1_loss(duration, duration_pred) if exists(duration) else duration_pred
+        pitch_return = F.l1_loss(pitch, pitch_pred) if exists(pitch) else pitch_pred
+
 
         return duration_return, pitch_return
 
