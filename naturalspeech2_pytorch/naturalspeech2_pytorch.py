@@ -28,7 +28,6 @@ from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
-import pyreaper
 from tqdm.auto import tqdm
 
 # constants
