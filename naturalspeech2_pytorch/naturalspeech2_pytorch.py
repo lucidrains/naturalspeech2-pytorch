@@ -7,7 +7,7 @@ from collections import namedtuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn, einsum
+from torch import nn, einsum, Tensor
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 
@@ -20,10 +20,11 @@ from audiolm_pytorch import SoundStream, EncodecWrapper
 from audiolm_pytorch.data import SoundDataset, get_dataloader
 
 from beartype import beartype
-from beartype.typing import Tuple, Union, Optional
+from beartype.typing import Tuple, Union, Optional, List
+from beartype.door import is_bearable
 
 from naturalspeech2_pytorch.attend import Attend
-from naturalspeech2_pytorch.utils.tokenizer import Tokenizer
+from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
@@ -86,6 +87,9 @@ class LearnedSinusoidalPosEmb(nn.Module):
 class PhonemeEncoder(nn.Module):
     def __init__(
         self,
+        *,
+        tokenizer: Optional[Tokenizer] = None,
+        num_tokens = None,
         dim = 512,
         dim_hidden = 1024,
         kernel_size = 9,
@@ -98,11 +102,17 @@ class PhonemeEncoder(nn.Module):
     ):
         super().__init__()
 
+        self.tokenizer = tokenizer
+        num_tokens = default(num_tokens, tokenizer.vocab_size if exists(tokenizer) else None)
+
+        self.token_emb = nn.Embedding(num_tokens + 1, dim) if exists(num_tokens) else nn.Identity()
+        self.pad_id = num_tokens
+
         same_padding = (kernel_size - 1) // 2
 
         self.conv = nn.Sequential(
             Rearrange('b n c -> b c n'),
-            nn.Conv1d(dim, dim_hidden, kernel_size, padding = same_padding),
+            CausalConv1d(dim, dim_hidden, kernel_size),
             nn.SiLU(),
             nn.Dropout(conv_dropout),
             Rearrange('b c n -> b n c'),
@@ -117,9 +127,22 @@ class PhonemeEncoder(nn.Module):
             use_flash = use_flash
         )
 
-    def forward(self, x):
+    @beartype
+    def forward(
+        self,
+        x: Union[Tensor, List[str]],
+        mask = None
+    ):
+        if is_bearable(x, List[str]):
+            assert exists(self.tokenizer)
+            x = self.tokenizer.texts_to_tensor_ids(x)
+
+        is_padding = x < 0
+        x = x.masked_fill(is_padding, self.pad_id)
+
+        x = self.token_emb(x)
         x = self.conv(x)
-        x = self.transformer(x)
+        x = self.transformer(x, mask = mask)
         return x
 
 class SpeechPromptEncoder(nn.Module):
@@ -222,9 +245,10 @@ class DurationPitchPredictor(nn.Module):
             nn.ReLU()
         )
 
+    @beartype
     def forward(
         self,
-        x,
+        x: Union[Tensor, List[str]],
         encoded_prompts,
         duration=None,
         pitch=None
@@ -280,7 +304,7 @@ class PerceiverResampler(nn.Module):
 
         self.norm = RMSNorm(dim)
 
-    def forward(self, x):
+    def forward(self, x, mask = None):
         batch = x.shape[0]
 
         x = self.proj_context(x)
@@ -288,7 +312,7 @@ class PerceiverResampler(nn.Module):
         latents = repeat(self.latents, 'n d -> b n d', b = batch)
 
         for attn, ff in self.layers:
-            latents = attn(latents, x) + latents
+            latents = attn(latents, x, mask = mask) + latents
             latents = ff(latents) + latents
 
         return self.norm(latents)
@@ -388,7 +412,7 @@ class WavenetStack(nn.Module):
         residuals = []
         skips = []
 
-        if isinstance(x, torch.Tensor):
+        if isinstance(x, Tensor):
             x = (x,) * len(self.blocks)
 
         for block_input, block in zip(x, self.blocks):
@@ -644,6 +668,7 @@ class Model(nn.Module):
         x,
         times,
         prompt = None,
+        prompt_mask = None,
         cond_drop_prob = None
     ):
         b = x.shape[0]
@@ -668,7 +693,7 @@ class Model(nn.Module):
 
             t = torch.cat((t, prompt_cond), dim = -1)
 
-            resampled_prompt_tokens = self.perceiver_resampler(encoded_prompt)
+            resampled_prompt_tokens = self.perceiver_resampler(encoded_prompt, mask = prompt_mask)
 
             c = torch.where(
                 rearrange(drop_mask, 'b -> b 1 1'),
@@ -736,7 +761,7 @@ class Attention(nn.Module):
         self.to_kv = nn.Linear(dim_context, dim_inner * 2, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
 
-    def forward(self, x, context = None):
+    def forward(self, x, context = None, mask = None):
         h, has_context = self.heads, exists(context)
 
         context = default(context, x)
@@ -747,7 +772,7 @@ class Attention(nn.Module):
         q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim = -1))
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
-        out = self.attend(q, k, v)
+        out = self.attend(q, k, v, mask = mask)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
@@ -791,9 +816,9 @@ class Transformer(nn.Module):
 
         self.norm = RMSNorm(dim) if final_norm else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, mask = None):
         for attn_norm, attn, ff_norm, ff in self.layers:
-            x = attn(attn_norm(x)) + x
+            x = attn(attn_norm(x), mask = mask) + x
             x = ff(ff_norm(x)) + x
 
         return self.norm(x)

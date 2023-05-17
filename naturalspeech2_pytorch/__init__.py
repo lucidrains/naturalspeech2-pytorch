@@ -13,7 +13,9 @@ from naturalspeech2_pytorch.naturalspeech2_pytorch import (
     Trainer,
     PhonemeEncoder,
     DurationPitchPredictor,
-    SpeechPromptEncoder
+    SpeechPromptEncoder,
+    Tokenizer,
+    ESpeak
 )
 
 from audiolm_pytorch import (
