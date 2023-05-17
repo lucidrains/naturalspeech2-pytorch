@@ -209,7 +209,8 @@ class DurationPitchPredictor(nn.Module):
         num_phoneme_tokens = None,
         tokenizer: Optional[Tokenizer] = None,
         dim_encoded_prompts = None,
-        depth = 30,
+        num_convolutions_per_block = 3,
+        depth = 10,
         kernel_size = 3,
         heads = 8,
         dim_head = 64,
@@ -229,13 +230,15 @@ class DurationPitchPredictor(nn.Module):
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                nn.Sequential(
-                    Rearrange('b n c -> b c n'),
-                    nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding = kernel_size // 2),
-                    nn.SiLU(),
-                    nn.Dropout(dropout),
-                    Rearrange('b c n -> b n c'),
-                ),
+                nn.Sequential(*[
+                    nn.Sequential(
+                        Rearrange('b n c -> b c n'),
+                        nn.Conv1d(dim_hidden, dim_hidden, kernel_size, padding = kernel_size // 2),
+                        nn.SiLU(),
+                        nn.Dropout(dropout),
+                        Rearrange('b c n -> b n c'),
+                    ) for _ in range(num_convolutions_per_block)
+                ]),
                 RMSNorm(dim),
                 Attention(
                     dim_hidden,
