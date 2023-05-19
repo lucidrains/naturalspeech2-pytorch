@@ -30,7 +30,7 @@ from accelerate import Accelerator
 from ema_pytorch import EMA
 
 from tqdm.auto import tqdm
-
+from naturalspeech2_pytorch.version import __version__
 # constants
 
 mlist = nn.ModuleList
@@ -1520,10 +1520,10 @@ class Trainer(object):
                                 t = rearrange(t, 'n -> 1 n')
                                 torchaudio.save(filename, t.cpu().detach(), self.unwrapped_model.target_sample_hz)
 
-                        self.print(f'{steps}: saving to {str(self.results_folder)}')
+                        print(f'{self.step}: saving to {str(self.results_folder)}')
 
-                        self.save(milestone)
+                        self.save(self.step)
 
                 pbar.update(1)
 
-        self.print('training complete')
+        print('training complete')
