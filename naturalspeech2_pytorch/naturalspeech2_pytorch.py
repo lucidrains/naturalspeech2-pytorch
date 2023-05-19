@@ -24,6 +24,7 @@ from beartype.typing import Tuple, Union, Optional, List
 from beartype.door import is_bearable
 
 from naturalspeech2_pytorch.attend import Attend
+from naturalspeech2_pytorch.aligner import AlignerNet, maximum_path
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 
 from accelerate import Accelerator
@@ -79,7 +80,34 @@ class LearnedSinusoidalPosEmb(nn.Module):
         fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
         fouriered = torch.cat((x, fouriered), dim = -1)
         return fouriered
+# compute pitch
 
+def compute_pitch(y, sr):
+    #https://pytorch.org/audio/main/generated/torchaudio.functional.compute_kaldi_pitch.html#torchaudio.functional.compute_kaldi_pitch
+    pitch_feature = F.compute_kaldi_pitch(y, sr)
+    pitch, nfcc = pitch_feature[..., 0], pitch_feature[..., 1]
+    return pitch
+
+#compute Alignement
+class Aligner(nn.Module):
+    def __init__(self, dim_in, dim_hidden, attn_channels,temperature=0.0005):
+        self.dim_in = dim_in
+        self.dim_hidden = dim_hidden
+        self.attn_channels = attn_channels
+        self.temperature = temperature
+        self.aligner = AlignerNet(dim_in = self.dim_in, 
+                                  dim_hidden = self.dim_hidden,
+                                  attn_channels = self.attn_channels,
+                                  temperature = self.temperature)
+    def forward(self, x, x_mask, y, y_mask):
+        attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
+        alignment_soft, alignment_logprob = self.aligner(y.transpose(1, 2), x.transpose(1, 2), x_mask, None)
+        alignment_mas = maximum_path(
+            alignment_soft.squeeze(1).transpose(1, 2).contiguous(), attn_mask.squeeze(1).contiguous()
+        )
+        alignment_hard = torch.sum(alignment_mas, -1).int()
+        alignment_soft = alignment_soft.squeeze(1).transpose(1, 2)
+        return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
 # peripheral models
 
 # phoneme - pitch - speech prompt - duration predictors
