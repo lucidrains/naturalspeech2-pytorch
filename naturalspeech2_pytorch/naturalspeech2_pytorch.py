@@ -83,9 +83,9 @@ class LearnedSinusoidalPosEmb(nn.Module):
         return fouriered
 # compute pitch
 
-def compute_pitch(y, sr):
+def compute_pitch(wav, sr):
     #https://pytorch.org/audio/main/generated/torchaudio.functional.compute_kaldi_pitch.html#torchaudio.functional.compute_kaldi_pitch
-    pitch_feature = F.compute_kaldi_pitch(y, sr)
+    pitch_feature = F.compute_kaldi_pitch(wav, sr)
     pitch, nfcc = pitch_feature[..., 0], pitch_feature[..., 1]
     return pitch
 
