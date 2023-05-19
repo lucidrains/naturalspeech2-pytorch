@@ -25,6 +25,7 @@ from beartype.door import is_bearable
 
 from naturalspeech2_pytorch.attend import Attend
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
+from naturalspeech2_pytorch.version import __version__
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
@@ -1436,6 +1437,9 @@ class Trainer(object):
 
         self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
 
+    def print(self, msg):
+        return self.accelerator.print(msg)
+
     @property
     def unwrapped_model(self):
         return self.accelerator.unwrap_model(self.model)
@@ -1515,6 +1519,7 @@ class Trainer(object):
                     self.ema.update()
 
                     if self.step % self.save_and_sample_every == 0:
+                        milestone = self.step // self.save_and_sample_every
 
                         models = [(self.unwrapped_model, str(self.step))]
 
@@ -1535,7 +1540,7 @@ class Trainer(object):
                                 t = rearrange(t, 'n -> 1 n')
                                 torchaudio.save(filename, t.cpu().detach(), self.unwrapped_model.target_sample_hz)
 
-                        self.print(f'{steps}: saving to {str(self.results_folder)}')
+                        self.print(f'{self.step}: saving to {str(self.results_folder)}')
 
                         self.save(milestone)
 
