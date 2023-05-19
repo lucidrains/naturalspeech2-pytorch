@@ -108,6 +108,20 @@ class Aligner(nn.Module):
         alignment_hard = torch.sum(alignment_mas, -1).int()
         alignment_soft = alignment_soft.squeeze(1).transpose(1, 2)
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
+
+#expand durations
+def expand_sequence(phoneme_hidden, duration_prediction):
+    expanded_sequence = []
+    for i, phoneme in enumerate(phoneme_hidden):
+        repeat_count = int(duration_prediction[i].item())
+        expanded_sequence.extend([phoneme] * repeat_count)
+    return torch.stack(expanded_sequence)
+
+# add pitch to duraion after adding pitch to durations add this to diffusion model
+# [TODO] check if we need to add average over durations function
+def add_pitch_information(expanded_sequence, pitch_prediction):
+    return expanded_sequence + pitch_prediction.unsqueeze(-1)
+
 # peripheral models
 
 # phoneme - pitch - speech prompt - duration predictors
@@ -1307,7 +1321,7 @@ class NaturalSpeech2(nn.Module):
             loss_weight = maybe_clipped_snr / (snr + 1)
 
         loss =  (loss * loss_weight).mean()
-
+        
         # cross entropy loss to codebooks
 
         if self.rvq_cross_entropy_loss_weight == 0 or not exists(codes):
