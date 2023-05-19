@@ -231,17 +231,31 @@ class ResnetBlock(nn.Module):
         kernel,
         *,
         dropout = 0.,
-        groups = 8
+        groups = 8,
+        num_convs = 2
     ):
         super().__init__()
-        self.block1 = Block(dim, dim_out, kernel, groups = groups, dropout = dropout)
-        self.block2 = Block(dim_out, dim_out, kernel, groups = groups, dropout = dropout)
+
+        blocks = []
+        for ind in range(num_convs):
+            is_first = ind == 0
+            dim_in = dim if is_first else dim_out
+            block = Block(
+                dim_in,
+                dim_out,
+                kernel,
+                groups = groups,
+                dropout = dropout
+            )
+            blocks.append(block)
+
+        self.blocks = nn.Sequential(*blocks)
+
         self.res_conv = nn.Conv1d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x):
         x = rearrange(x, 'b n c -> b c n')
-        h = self.block1(x)
-        h = self.block2(h)
+        h = self.blocks(x)
         out = h + self.res_conv(x)
         return rearrange(out, 'b c n -> b n c')
 
@@ -264,6 +278,7 @@ class DurationPitchPredictor(nn.Module):
         dim_encoded_prompts = None,
         num_convolutions_per_block = 3,
         use_resnet_block = True,
+        num_convs_per_resnet_block = 2,
         depth = 10,
         kernel_size = 3,
         heads = 8,
@@ -282,7 +297,7 @@ class DurationPitchPredictor(nn.Module):
 
         self.layers = nn.ModuleList([])
 
-        conv_klass = ConvBlock if not use_resnet_block else ResnetBlock
+        conv_klass = ConvBlock if not use_resnet_block else partial(ResnetBlock, num_convs = num_convs_per_resnet_block)
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
