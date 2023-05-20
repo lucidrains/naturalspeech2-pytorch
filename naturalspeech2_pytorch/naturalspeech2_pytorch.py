@@ -4,7 +4,8 @@ from pathlib import Path
 from random import random
 from functools import partial
 from collections import namedtuple
-
+import pyworld as pw
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum, Tensor
@@ -81,15 +82,33 @@ class LearnedSinusoidalPosEmb(nn.Module):
         fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
         fouriered = torch.cat((x, fouriered), dim = -1)
         return fouriered
+
 # compute pitch
 
-def compute_pitch(wav, sr):
+def compute_pitch_pytorch(wav, sr):
     #https://pytorch.org/audio/main/generated/torchaudio.functional.compute_kaldi_pitch.html#torchaudio.functional.compute_kaldi_pitch
     pitch_feature = F.compute_kaldi_pitch(wav, sr)
     pitch, nfcc = pitch_feature[..., 0], pitch_feature[..., 1]
     return pitch
 
+#as mentioned in paper using pyworld
+
+def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
+    # align F0 length to the spectrogram length
+    if len(spec) % hop_length == 0:
+        spec = np.pad(spec, (0, hop_length // 2), mode="reflect")
+
+    f0, t = pw.dio(
+        spec.astype(np.double),
+        fs=sample_rate,
+        f0_ceil=pitch_fmax,
+        frame_period=1000 * hop_length / sample_rate,
+    )
+    f0 = pw.stonemask(spec.astype(np.double), f0, t, sample_rate)
+    return f0
+
 #compute Alignement
+
 class Aligner(nn.Module):
     def __init__(self, dim_in, dim_hidden, attn_channels,temperature=0.0005):
         self.dim_in = dim_in
@@ -112,6 +131,7 @@ class Aligner(nn.Module):
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
 
 #expand durations
+
 def expand_sequence(phoneme_hidden, duration_prediction):
     expanded_sequence = []
     for i, phoneme in enumerate(phoneme_hidden):
@@ -121,6 +141,7 @@ def expand_sequence(phoneme_hidden, duration_prediction):
 
 # add pitch to duraion after adding pitch to durations add this to diffusion model
 # [TODO] check if we need to add average over durations function
+
 def add_pitch_information(expanded_sequence, pitch_prediction):
     return expanded_sequence + pitch_prediction.unsqueeze(-1)
 
