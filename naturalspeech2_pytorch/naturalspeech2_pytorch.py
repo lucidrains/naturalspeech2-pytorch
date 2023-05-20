@@ -1323,6 +1323,7 @@ class NaturalSpeech2(nn.Module):
             loss_weight = maybe_clipped_snr / (snr + 1)
 
         loss =  (loss * loss_weight).mean()
+
         # cross entropy loss to codebooks
 
         if self.rvq_cross_entropy_loss_weight == 0 or not exists(codes):
