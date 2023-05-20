@@ -104,10 +104,11 @@ class Aligner(nn.Module):
         attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
         alignment_soft, alignment_logprob = self.aligner(y.transpose(1, 2), x.transpose(1, 2), x_mask, None)
         alignment_mas = maximum_path(
-            alignment_soft.squeeze(1).transpose(1, 2).contiguous(), attn_mask.squeeze(1).contiguous()
+            rearrange(alignment_soft, 'b c t -> b t c').contiguous(),
+            rearrange(attn_mask, 'b 1 t -> b t').contiguous()
         )
         alignment_hard = torch.sum(alignment_mas, -1).int()
-        alignment_soft = alignment_soft.squeeze(1).transpose(1, 2)
+        alignment_soft = rearrange(alignment_soft, 'b c t -> b t c')
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
 
 #expand durations
@@ -1322,7 +1323,6 @@ class NaturalSpeech2(nn.Module):
             loss_weight = maybe_clipped_snr / (snr + 1)
 
         loss =  (loss * loss_weight).mean()
-        
         # cross entropy loss to codebooks
 
         if self.rvq_cross_entropy_loss_weight == 0 or not exists(codes):

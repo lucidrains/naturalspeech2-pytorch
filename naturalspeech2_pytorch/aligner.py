@@ -4,8 +4,6 @@ from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
 import numpy as np
-from numba import jit, prange
-
 class AlignerNet(torch.nn.Module):
     """alignment model https://arxiv.org/pdf/2108.10447.pdf """
     def __init__(
@@ -62,7 +60,7 @@ class AlignerNet(torch.nn.Module):
         attn_logp = -self.temperature * attn_factor.sum(1, keepdim=True)
 
         if mask is not None:
-            attn_logp.data.masked_fill_(~mask.bool().unsqueeze(2), -float("inf"))
+            attn_logp.data.masked_fill_(~rearrange(mask, 'b t -> b t ()'), -torch.finfo(attn_logp.dtype).max)
 
         attn = self.softmax(attn_logp)
         return attn, attn_logp
@@ -113,7 +111,7 @@ class ForwardSumLoss():
         max_key_len = attn_logprob.size(-1)
 
         # Reorder input to [query_len, batch_size, key_len]
-        attn_logprob = attn_logprob.squeeze(1).permute(1, 0, 2)
+        attn_logprob = rearrange(attn_logprob, 'b c t -> c b t')
 
         # Add blank label
         attn_logprob = F.pad(attn_logprob, (1, 0, 0, 0, 0, 0), self.blank_logprob)
@@ -127,7 +125,7 @@ class ForwardSumLoss():
 
         # Target sequences
         target_seqs = torch.arange(1, max_key_len + 1, device=device, dtype=torch.long).unsqueeze(0)
-        target_seqs = target_seqs.expand(key_lens.numel(), -1)
+        target_seqs = target_seqs.repeat(key_lens.numel(), 1)
 
         # Evaluate CTC loss
         cost = self.ctc_loss(attn_logprob, target_seqs, query_lens, key_lens)
