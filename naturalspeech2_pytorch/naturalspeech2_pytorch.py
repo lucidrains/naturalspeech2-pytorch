@@ -130,21 +130,6 @@ class Aligner(nn.Module):
         alignment_soft = rearrange(alignment_soft, 'b c t -> b t c')
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
 
-#expand durations
-
-def expand_sequence(phoneme_hidden, duration_prediction):
-    expanded_sequence = []
-    for i, phoneme in enumerate(phoneme_hidden):
-        repeat_count = int(duration_prediction[i].item())
-        expanded_sequence.extend([phoneme] * repeat_count)
-    return torch.stack(expanded_sequence)
-
-# add pitch to duraion after adding pitch to durations add this to diffusion model
-# [TODO] check if we need to add average over durations function
-
-def add_pitch_information(expanded_sequence, pitch_prediction):
-    return expanded_sequence + pitch_prediction.unsqueeze(-1)
-
 # peripheral models
 
 # phoneme - pitch - speech prompt - duration predictors
