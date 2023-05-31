@@ -16,7 +16,6 @@ class AlignerNet(torch.nn.Module):
         super().__init__()
         self.temperature = temperature
         self.softmax = torch.nn.Softmax(dim=3)
-        self.log_softmax = torch.nn.LogSoftmax(dim=3)
 
         self.key_layers = nn.ModuleList([
             nn.Conv1d(
