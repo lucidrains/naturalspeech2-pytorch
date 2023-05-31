@@ -56,8 +56,7 @@ class AlignerNet(torch.nn.Module):
         key_out = rearrange(key_out, 'b c t -> b c 1 t')
         query_out = rearrange(query_out, 'b c t -> b c t 1')
 
-        attn_factor = (query_out - key_out) ** 2
-        attn_logp = -self.temperature * attn_factor.sum(1, keepdim=True)
+        attn_logp = torch.cdist(query_out, key_out)
 
         if mask is not None:
             attn_logp.data.masked_fill_(~rearrange(mask, 'b t -> b t ()'), -torch.finfo(attn_logp.dtype).max)
