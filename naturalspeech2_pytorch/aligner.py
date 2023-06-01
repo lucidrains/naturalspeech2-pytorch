@@ -52,49 +52,55 @@ class AlignerNet(torch.nn.Module):
         for layer in self.query_layers:
             query_out = layer(query_out)
 
-        key_out = rearrange(key_out, 'b c t -> b c 1 t')
-        query_out = rearrange(query_out, 'b c t -> b c t 1')
-
-        attn_logp = torch.cdist(query_out, key_out)
-
+        key_out = rearrange(key_out, 'b c t -> b t c')
+        query_out = rearrange(query_out, 'b c t -> b t c')
+        print(query_out.shape, key_out.shape)
+        attn_logp = torch.cdist(query_out, key_out).unsqueeze(1)
+        # attn_logp = rearrange(key_out, 'b c t -> b 1 c t')
+        # attn_factor = (query_out[:, :, :, None] - key_out[:, :, None]) ** 2
+        # attn_logp = -self.temperature * attn_factor.sum(1, keepdim=True)
+        print("attn_logp: ", attn_logp.shape)
         if mask is not None:
-            attn_logp.data.masked_fill_(~rearrange(mask, 'b t -> b t ()'), -torch.finfo(attn_logp.dtype).max)
+            print(mask.shape)
+            attn_logp.data.masked_fill_(~mask.bool().unsqueeze(2), -float("inf"))
 
         attn = self.softmax(attn_logp)
         return attn, attn_logp
 
 def maximum_path(value, mask, const=None):
     if const is None:
-        const = -np.inf
+        const = -np.inf  # Patch for Sphinx complaint
     value = value * mask
 
+    device = value.device
+    dtype = value.dtype
+    value = value.cpu().detach().numpy()
+    mask = mask.cpu().detach().numpy().astype(np.bool)
+
     b, t_x, t_y = value.shape
-    dir_matrix = np.zeros_like(value, dtype=np.int64)
+    direction = np.zeros(value.shape, dtype=np.int64)
     v = np.zeros((b, t_x), dtype=np.float32)
     x_range = np.arange(t_x, dtype=np.float32).reshape(1, -1)
-
-    value = rearrange(value, 'b c t -> b t c')
-    mask = rearrange(mask, 'b c t -> b t c')
-
     for j in range(t_y):
-        v_prev = np.pad(v, [[0, 0], [1, 0]], mode="constant", constant_values=const)[:, :-1]
-        v_max = np.maximum(v_prev, v)
-        max_mask = v_max == v
-        dir_matrix[:, :, j] = max_mask
+        v0 = np.pad(v, [[0, 0], [1, 0]], mode="constant", constant_values=const)[:, :-1]
+        v1 = v
+        max_mask = v1 >= v0
+        v_max = np.where(max_mask, v1, v0)
+        direction[:, :, j] = max_mask
 
-        v = np.where(x_range <= j, v_max + value[:, j:j+1, :], const)
+        index_mask = x_range <= j
+        v = np.where(index_mask, v_max + value[:, :, j], const)
+    direction = np.where(mask, direction, 1)
 
-    dir_matrix = np.where(mask, dir_matrix, 1)
-
-    path = np.zeros_like(value, dtype=np.float32)
+    path = np.zeros(value.shape, dtype=np.float32)
     index = mask[:, :, 0].sum(1).astype(np.int64) - 1
-
+    index_range = np.arange(b)
     for j in reversed(range(t_y)):
-        path[index, np.arange(b), j] = 1
-        index = index + dir_matrix[:, :, j][index, np.arange(b)] - 1
-
+        path[index_range, index, j] = 1
+        index = index + direction[index_range, index, j] - 1
     path = path * mask.astype(np.float32)
-    return torch.from_numpy(rearrange(path, 'b t c -> b c t'))
+    path = torch.from_numpy(path).to(device=device, dtype=dtype)
+    return path
 
 class ForwardSumLoss():
     def __init__(self, blank_logprob=-1):
@@ -139,3 +145,48 @@ class BinLoss():
     def forward(self, hard_attention, soft_attention):
         log_sum = torch.log(torch.clamp(soft_attention[hard_attention == 1], min=1e-12)).sum()
         return -log_sum / hard_attention.sum()
+
+class Aligner(nn.Module):
+    def __init__(self, dim_in, dim_hidden, attn_channels=80 ,temperature=0.0005):
+        super().__init__()
+        self.dim_in = dim_in
+        self.dim_hidden = dim_hidden
+        self.attn_channels = attn_channels
+        self.temperature = temperature
+        self.aligner = AlignerNet(dim_in = self.dim_in, 
+                                  dim_hidden = self.dim_hidden,
+                                  attn_channels = self.attn_channels,
+                                  temperature = self.temperature)
+    def forward(self, x, x_mask, y, y_mask):
+        attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
+        alignment_soft, alignment_logprob = self.aligner(y.transpose(1, 2), x, x_mask)
+        print(rearrange(alignment_soft, 'b 1 c t -> b t c').shape, rearrange(attn_mask, 'b 1 c t -> b c t').shape)
+        alignment_soft = rearrange(alignment_soft, 'b 1 c t -> b t c')
+        alignment_mas = maximum_path(
+            alignment_soft.contiguous(),
+            rearrange(attn_mask, 'b 1 c t -> b c t').contiguous()
+        )
+        alignment_hard = torch.sum(alignment_mas, -1).int()
+        return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
+    
+if __name__ == '__main__':
+    batch_size = 10
+    seq_len_y = 200  # length of sequence y
+    seq_len_x = 35
+    feature_dim = 80  # feature dimension
+
+    x = torch.randn(batch_size, 512, seq_len_x)
+    y = torch.randn(batch_size, seq_len_y, feature_dim)
+    
+    # Create masks
+    x_mask = torch.ones(batch_size, 1, seq_len_x)
+    y_mask = torch.ones(batch_size, 1, seq_len_y)
+
+    align = Aligner(dim_in = 80, dim_hidden=512, attn_channels=80)
+    print(x.shape, x_mask.shape, y.shape, y_mask.shape)
+    alignment_hard, alignment_soft, alignment_logprob, alignment_mas = align(x, x_mask, y, y_mask)
+
+    print(alignment_hard.shape)
+    print(alignment_soft.shape)
+    print(alignment_logprob.shape)
+    print(alignment_mas.shape)

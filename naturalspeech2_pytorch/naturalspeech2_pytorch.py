@@ -25,7 +25,7 @@ from beartype.typing import Tuple, Union, Optional, List
 from beartype.door import is_bearable
 
 from naturalspeech2_pytorch.attend import Attend
-from naturalspeech2_pytorch.aligner import AlignerNet, maximum_path
+from naturalspeech2_pytorch.aligner import Aligner
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 from naturalspeech2_pytorch.version import __version__
 
@@ -108,27 +108,6 @@ def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
     return f0
 
 #compute Alignement
-
-class Aligner(nn.Module):
-    def __init__(self, dim_in, dim_hidden, attn_channels,temperature=0.0005):
-        self.dim_in = dim_in
-        self.dim_hidden = dim_hidden
-        self.attn_channels = attn_channels
-        self.temperature = temperature
-        self.aligner = AlignerNet(dim_in = self.dim_in, 
-                                  dim_hidden = self.dim_hidden,
-                                  attn_channels = self.attn_channels,
-                                  temperature = self.temperature)
-    def forward(self, x, x_mask, y, y_mask):
-        attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
-        alignment_soft, alignment_logprob = self.aligner(y.transpose(1, 2), x.transpose(1, 2), x_mask, None)
-        alignment_mas = maximum_path(
-            rearrange(alignment_soft, 'b c t -> b t c').contiguous(),
-            rearrange(attn_mask, 'b 1 t -> b t').contiguous()
-        )
-        alignment_hard = torch.sum(alignment_mas, -1).int()
-        alignment_soft = rearrange(alignment_soft, 'b c t -> b t c')
-        return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
 
 # peripheral models
 
