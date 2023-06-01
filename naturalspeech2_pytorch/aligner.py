@@ -54,53 +54,56 @@ class AlignerNet(torch.nn.Module):
 
         key_out = rearrange(key_out, 'b c t -> b t c')
         query_out = rearrange(query_out, 'b c t -> b t c')
-        print(query_out.shape, key_out.shape)
         attn_logp = torch.cdist(query_out, key_out).unsqueeze(1)
-        # attn_logp = rearrange(key_out, 'b c t -> b 1 c t')
-        # attn_factor = (query_out[:, :, :, None] - key_out[:, :, None]) ** 2
-        # attn_logp = -self.temperature * attn_factor.sum(1, keepdim=True)
-        print("attn_logp: ", attn_logp.shape)
+
         if mask is not None:
-            print(mask.shape)
             attn_logp.data.masked_fill_(~mask.bool().unsqueeze(2), -float("inf"))
 
         attn = self.softmax(attn_logp)
         return attn, attn_logp
 
-def maximum_path(value, mask, const=None):
-    if const is None:
-        const = -np.inf  # Patch for Sphinx complaint
-    value = value * mask
+def pad_tensor(input, pad, mode='constant', value=0):
+    pad = [item for sublist in reversed(pad) for item in sublist]  # Flatten the tuple
+    assert len(pad) // 2 == len(input.shape), 'Padding dimensions do not match input dimensions'
+    if mode == 'constant':
+        return torch.nn.functional.pad(input, pad, mode='constant', value=value)
+    else:
+        raise NotImplementedError('Only constant padding mode is implemented')
 
+
+def maximum_path(value, mask, const=None):
     device = value.device
     dtype = value.dtype
-    value = value.cpu().detach().numpy()
-    mask = mask.cpu().detach().numpy().astype(np.bool)
+    if const is None:
+        const = torch.tensor(float('-inf')).to(device)  # Patch for Sphinx complaint
+    value = value * mask
 
     b, t_x, t_y = value.shape
-    direction = np.zeros(value.shape, dtype=np.int64)
-    v = np.zeros((b, t_x), dtype=np.float32)
-    x_range = np.arange(t_x, dtype=np.float32).reshape(1, -1)
+    direction = torch.zeros(value.shape, dtype=torch.int64, device=device)
+    v = torch.zeros((b, t_x), dtype=torch.float32, device=device)
+    x_range = torch.arange(t_x, dtype=torch.float32, device=device).view(1, -1)
     for j in range(t_y):
-        v0 = np.pad(v, [[0, 0], [1, 0]], mode="constant", constant_values=const)[:, :-1]
+        v0 = pad_tensor(v, ((0, 0), (1, 0)), mode="constant", value=const)[:, :-1]
         v1 = v
         max_mask = v1 >= v0
-        v_max = np.where(max_mask, v1, v0)
+        v_max = torch.where(max_mask, v1, v0)
         direction[:, :, j] = max_mask
 
         index_mask = x_range <= j
-        v = np.where(index_mask, v_max + value[:, :, j], const)
-    direction = np.where(mask, direction, 1)
+        v = torch.where(index_mask.view(1,-1), v_max + value[:, :, j], const)
+    direction = torch.where(mask.bool(), direction, 1)
 
-    path = np.zeros(value.shape, dtype=np.float32)
-    index = mask[:, :, 0].sum(1).astype(np.int64) - 1
-    index_range = np.arange(b)
+    path = torch.zeros(value.shape, dtype=torch.float32, device=device)
+    index = mask[:, :, 0].sum(1).long() - 1
+    index_range = torch.arange(b, device=device)
     for j in reversed(range(t_y)):
         path[index_range, index, j] = 1
         index = index + direction[index_range, index, j] - 1
-    path = path * mask.astype(np.float32)
-    path = torch.from_numpy(path).to(device=device, dtype=dtype)
+    path = path * mask.float()
+    path = path.to(dtype=dtype)
     return path
+
+
 
 class ForwardSumLoss():
     def __init__(self, blank_logprob=-1):
@@ -160,7 +163,6 @@ class Aligner(nn.Module):
     def forward(self, x, x_mask, y, y_mask):
         attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
         alignment_soft, alignment_logprob = self.aligner(y.transpose(1, 2), x, x_mask)
-        print(rearrange(alignment_soft, 'b 1 c t -> b t c').shape, rearrange(attn_mask, 'b 1 c t -> b c t').shape)
         alignment_soft = rearrange(alignment_soft, 'b 1 c t -> b t c')
         alignment_mas = maximum_path(
             alignment_soft.contiguous(),
@@ -183,10 +185,4 @@ if __name__ == '__main__':
     y_mask = torch.ones(batch_size, 1, seq_len_y)
 
     align = Aligner(dim_in = 80, dim_hidden=512, attn_channels=80)
-    print(x.shape, x_mask.shape, y.shape, y_mask.shape)
     alignment_hard, alignment_soft, alignment_logprob, alignment_mas = align(x, x_mask, y, y_mask)
-
-    print(alignment_hard.shape)
-    print(alignment_soft.shape)
-    print(alignment_logprob.shape)
-    print(alignment_mas.shape)
