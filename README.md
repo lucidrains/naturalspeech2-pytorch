@@ -18,7 +18,7 @@ This repository will use denoising diffusion rather than score-based SDE, and ma
 
 - <a href="https://huggingface.co/">🤗 Huggingface</a> for the amazing accelerate library
 
-- <a href="https://github.com/manmay-nakhashi">Manmay</a> for submitting the initial code for phoneme, pitch, duration, and speech prompt encoders as well as the multilingual phonemizer!
+- <a href="https://github.com/manmay-nakhashi">Manmay</a> for submitting the initial code for phoneme, pitch, duration, and speech prompt encoders as well as the multilingual phonemizer and phoneme aligner!
 
 - You? If you are an aspiring ML / AI engineer or work in the TTS field and would like to contribute to open sourcing state-of-the-art, jump right in!
 
