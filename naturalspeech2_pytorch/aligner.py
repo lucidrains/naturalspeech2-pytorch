@@ -139,16 +139,6 @@ class ForwardSumLoss():
 
         return cost
 
-
-
-class BinLoss():
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, hard_attention, soft_attention):
-        log_sum = torch.log(torch.clamp(soft_attention[hard_attention == 1], min=1e-12)).sum()
-        return -log_sum / hard_attention.sum()
-
 class Aligner(nn.Module):
     def __init__(self, dim_in, dim_hidden, attn_channels=80 ,temperature=0.0005):
         super().__init__()
