@@ -4,7 +4,8 @@ from pathlib import Path
 from random import random
 from functools import partial
 from collections import namedtuple
-
+import pyworld as pw
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum, Tensor
@@ -24,6 +25,7 @@ from beartype.typing import Tuple, Union, Optional, List
 from beartype.door import is_bearable
 
 from naturalspeech2_pytorch.attend import Attend
+from naturalspeech2_pytorch.aligner import Aligner
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 from naturalspeech2_pytorch.version import __version__
 
@@ -80,6 +82,32 @@ class LearnedSinusoidalPosEmb(nn.Module):
         fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
         fouriered = torch.cat((x, fouriered), dim = -1)
         return fouriered
+
+# compute pitch
+
+def compute_pitch_pytorch(wav, sr):
+    #https://pytorch.org/audio/main/generated/torchaudio.functional.compute_kaldi_pitch.html#torchaudio.functional.compute_kaldi_pitch
+    pitch_feature = F.compute_kaldi_pitch(wav, sr)
+    pitch, nfcc = pitch_feature[..., 0], pitch_feature[..., 1]
+    return pitch
+
+#as mentioned in paper using pyworld
+
+def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
+    # align F0 length to the spectrogram length
+    if len(spec) % hop_length == 0:
+        spec = np.pad(spec, (0, hop_length // 2), mode="reflect")
+
+    f0, t = pw.dio(
+        spec.astype(np.double),
+        fs=sample_rate,
+        f0_ceil=pitch_fmax,
+        frame_period=1000 * hop_length / sample_rate,
+    )
+    f0 = pw.stonemask(spec.astype(np.double), f0, t, sample_rate)
+    return f0
+
+#compute Alignement
 
 # peripheral models
 
