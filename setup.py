@@ -29,6 +29,7 @@ setup(
     'inflect',
     'local-attention',
     'num2words',
+    'pyworld',
     'torch>=1.6',
     'tqdm',
     'vector-quantize-pytorch>=1.4.1'

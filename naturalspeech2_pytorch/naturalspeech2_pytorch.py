@@ -1,11 +1,13 @@
 import math
+import copy
 from multiprocessing import cpu_count
 from pathlib import Path
 from random import random
 from functools import partial
 from collections import namedtuple
-import pyworld as pw
+
 import numpy as np
+
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum, Tensor
@@ -33,6 +35,7 @@ from accelerate import Accelerator
 from ema_pytorch import EMA
 
 from tqdm.auto import tqdm
+import pyworld as pw
 
 # constants
 
@@ -324,12 +327,13 @@ class DurationPitchPredictor(nn.Module):
 
         self.phoneme_token_emb = nn.Embedding(num_phoneme_tokens, dim) if exists(num_phoneme_tokens) else nn.Identity()
 
-        self.layers = nn.ModuleList([])
+        self.pitch_predictor_layers = nn.ModuleList([])
+        self.duration_predictor_layers = nn.ModuleList([])
 
         conv_klass = ConvBlock if not use_resnet_block else partial(ResnetBlock, num_convs = num_convs_per_resnet_block)
 
         for _ in range(depth):
-            self.layers.append(nn.ModuleList([
+            layer = nn.ModuleList([
                 nn.Sequential(*[
                     conv_klass(dim_hidden, dim_hidden, kernel_size) for _ in range(num_convolutions_per_block)
                 ]),
@@ -343,12 +347,18 @@ class DurationPitchPredictor(nn.Module):
                     use_flash = use_flash_attn,
                     cross_attn_include_queries = True
                 )
-            ]))
+            ])
 
-        self.to_pred = nn.Sequential(
-            nn.Linear(dim_hidden, 2),
+            self.pitch_predictor_layers.append(layer)
+            self.duration_predictor_layers.append(copy.deepcopy(layer))
+
+        self.to_pitch_pred = nn.Sequential(
+            nn.Linear(dim_hidden, 1),
+            Rearrange('... 1 -> ...'),
             nn.ReLU()
         )
+
+        self.to_duration_pred = copy.deepcopy(self.to_pitch_pred)
 
     @beartype
     def forward(
@@ -365,11 +375,21 @@ class DurationPitchPredictor(nn.Module):
 
         x = self.phoneme_token_emb(x)
 
-        for conv, norm, attn in self.layers:
-            x = conv(x)
-            x = attn(norm(x), encoded_prompts, mask = prompt_mask) + x
+        # d for duration path
+        # p for pitch path
 
-        duration_pred, pitch_pred = self.to_pred(x).unbind(dim = -1)
+        d = x.clone()
+        p = x.clone()
+
+        for conv, norm, attn in self.pitch_predictor_layers:
+            p = conv(p)
+            p = attn(norm(p), encoded_prompts, mask = prompt_mask) + p
+
+        for conv, norm, attn in self.duration_predictor_layers:
+            d = conv(d)
+            d = attn(norm(d), encoded_prompts, mask = prompt_mask) + d
+
+        duration_pred, pitch_pred = self.to_duration_pred(d), self.to_pitch_pred(p)
 
         duration_return = F.l1_loss(duration, duration_pred) if exists(duration) else duration_pred
         pitch_return = F.l1_loss(pitch, pitch_pred) if exists(pitch) else pitch_pred
