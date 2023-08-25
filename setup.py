@@ -30,6 +30,7 @@ setup(
     'local-attention',
     'num2words',
     'pyworld',
+    'pydantic<2.0',
     'torch>=1.6',
     'tqdm',
     'vector-quantize-pytorch>=1.4.1'
