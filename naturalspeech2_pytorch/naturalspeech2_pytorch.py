@@ -29,6 +29,7 @@ from beartype.door import is_bearable
 from naturalspeech2_pytorch.attend import Attend
 from naturalspeech2_pytorch.aligner import Aligner
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
+from naturalspeech2_pytorch.utils.utils import average_over_durations
 from naturalspeech2_pytorch.version import __version__
 
 from accelerate import Accelerator
@@ -38,6 +39,11 @@ from tqdm.auto import tqdm
 import pyworld as pw
 
 # constants
+f0_bin = 256
+f0_max = 1100.0
+f0_min = 50.0
+f0_mel_max = 1127 * np.log(1 + f0_max / 700)
+f0_mel_min = 1127 * np.log(1 + f0_min / 700)
 
 mlist = nn.ModuleList
 
@@ -109,7 +115,16 @@ def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
     )
     f0 = pw.stonemask(spec.astype(np.double), f0, t, sample_rate)
     return f0
+def f0_to_coarse(f0):
+  is_torch = isinstance(f0, torch.Tensor)
+  f0_mel = 1127 * (1 + f0 / 700).log() if is_torch else 1127 * np.log(1 + f0 / 700)
+  f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - f0_mel_min) * (f0_bin - 2) / (f0_mel_max - f0_mel_min) + 1
 
+  f0_mel[f0_mel <= 1] = 1
+  f0_mel[f0_mel > f0_bin - 1] = f0_bin - 1
+  f0_coarse = (f0_mel + 0.5).int() if is_torch else np.rint(f0_mel).astype(int)
+  assert f0_coarse.max() <= 255 and f0_coarse.min() >= 1, (f0_coarse.max(), f0_coarse.min())
+  return f0_coarse
 # peripheral models
 
 # phoneme - pitch - speech prompt - duration predictors
@@ -402,9 +417,7 @@ class DurationPitchPredictor(nn.Module):
         self,
         x: Union[Tensor, List[str]],
         encoded_prompts,
-        prompt_mask = None,
-        duration = None,
-        pitch = None
+        prompt_mask = None
     ):
         if is_bearable(x, List[str]):
             assert exists(self.tokenizer)
@@ -414,10 +427,8 @@ class DurationPitchPredictor(nn.Module):
 
         duration_pred, pitch_pred = map(lambda fn: fn(x, encoded_prompts = encoded_prompts, prompt_mask = prompt_mask), (self.to_duration_pred, self.to_pitch_pred))
 
-        duration_return = F.l1_loss(duration, duration_pred) if exists(duration) else duration_pred
-        pitch_return = F.l1_loss(pitch, pitch_pred) if exists(pitch) else pitch_pred
 
-        return duration_return, pitch_return
+        return duration_pred, pitch_pred
 
 # use perceiver resampler from flamingo paper - https://arxiv.org/abs/2204.14198
 # in lieu of "q-k-v" attention with the m queries becoming key / values on which ddpm network is conditioned on
@@ -1043,6 +1054,13 @@ class NaturalSpeech2(nn.Module):
         scale = 1.                             # this will be set to < 1. for better convergence when training on higher resolution images
     ):
         super().__init__()
+
+        self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer)
+        self.prompt_enc = SpeechPromptEncoder(dim_codebook=128) # 128 for encodec
+        self.duration_pitch = DurationPitchPredictor(dim=512)
+        self.aligner = Aligner(dim_in = 80, dim_hidden=512, attn_channels=80)
+        self.pitch_emb = nn.Embedding(256, self.args.pp_hidden_dim)
+
         self.model = model
         self.codec = codec
 
@@ -1253,7 +1271,12 @@ class NaturalSpeech2(nn.Module):
                 prompt, _, _ = self.codec(prompt, curtail_from_left = True, return_encoded = True)
 
         return prompt
-
+    def expand_encodings(self, phoneme_enc, attn, pitch):
+        expanded_dur = torch.einsum("klmn, kjm -> kjn", [attn, phoneme_enc])
+        pitch_emb = self.pitch_emb(f0_to_coarse(pitch).squeeze(1)).transpose(1,2)
+        expanded_pitch = torch.einsum("klmn, kjm -> kjn", [attn, pitch_emb])
+        expanded_encodings = expanded_dur + expanded_pitch
+        return expanded_encodings
     @torch.no_grad()
     def sample(
         self,
@@ -1282,9 +1305,12 @@ class NaturalSpeech2(nn.Module):
 
     def forward(
         self,
+        text,
+        mel,
         audio,
         codes = None,
         prompt = None,
+        pitch = None
         *args,
         **kwargs
     ):
@@ -1296,9 +1322,18 @@ class NaturalSpeech2(nn.Module):
             with torch.no_grad():
                 self.codec.eval()
                 audio, codes, _ = self.codec(audio, return_encoded = True)
-
+        #create mask
+        mel_mask = create_mask()
+        text_mask = create_mask()
+        
         prompt = self.process_prompt(prompt)
-
+        prompt_enc = self.prompt_enc(prompt)
+        phoneme_enc = self.phoneme_enc(text)
+        aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
+        duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
+        pitch = average_over_durations(pitch, aln_hard)
+        cond = self.expand_encodings(phoneme_enc, aln_mas.unsqueeze(1), pitch)
+        
         batch, n, d, device = *audio.shape, self.device
 
         assert d == self.dim, f'codec codebook dimension {d} must match model dimensions {self.dim}'
@@ -1319,7 +1354,7 @@ class NaturalSpeech2(nn.Module):
 
         # predict and take gradient step
 
-        pred = self.model(noised_audio, times, prompt = prompt)
+        pred = self.model(noised_audio, times, prompt = prompt, cond=cond)
 
         if self.objective == 'eps':
             target = noise
@@ -1367,8 +1402,11 @@ class NaturalSpeech2(nn.Module):
             x_start = alpha * audio - sigma * pred
 
         _, ce_loss = self.codec.rq(x_start, codes)
-
-        return loss + self.rvq_cross_entropy_loss_weight * ce_loss
+        # pitch and duration loss
+        duration_loss = F.l1_loss(duration, duration_pred) if exists(duration) else duration_pred
+        pitch_loss = F.l1_loss(pitch, pitch_pred) if exists(pitch) else pitch_pred
+        
+        return loss + self.rvq_cross_entropy_loss_weight * ce_loss + duration_loss + pitch_loss
 
 # trainer
 
