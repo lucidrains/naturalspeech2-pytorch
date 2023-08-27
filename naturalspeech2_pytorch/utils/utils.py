@@ -1,4 +1,5 @@
 import torch
+from einops import repeat
 def average_over_durations(values, durs):
     """
         - in:
@@ -14,8 +15,8 @@ def average_over_durations(values, durs):
 
     bs, l = durs_cums_ends.size()
     n_formants = values.size(1)
-    dcs = durs_cums_starts[:, None, :].expand(bs, n_formants, l)
-    dce = durs_cums_ends[:, None, :].expand(bs, n_formants, l)
+    dcs = repeat(durs_cums_starts, 'bs l -> bs n l', n=n_formants)
+    dce = repeat(durs_cums_ends, 'bs l -> bs n l', n=n_formants)
 
     values_sums = (torch.gather(values_cums, 2, dce) - torch.gather(values_cums, 2, dcs)).to(values.dtype)
     values_nelems = (torch.gather(values_nonzero_cums, 2, dce) - torch.gather(values_nonzero_cums, 2, dcs)).to(values.dtype)

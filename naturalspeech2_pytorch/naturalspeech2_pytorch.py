@@ -1039,6 +1039,7 @@ class NaturalSpeech2(nn.Module):
         model: Model,
         codec: Optional[Union[SoundStream, EncodecWrapper]] = None,
         *,
+        
         tokenizer: Optional[Tokenizer] = None,
         target_sample_hz = None,
         timesteps = 1000,
@@ -1050,16 +1051,23 @@ class NaturalSpeech2(nn.Module):
         min_snr_loss_weight = True,
         min_snr_gamma = 5,
         train_prob_self_cond = 0.9,
-        rvq_cross_entropy_loss_weight = 0.,    # default this to off until we are sure it is working. not totally sold that this is critical
-        scale = 1.                             # this will be set to < 1. for better convergence when training on higher resolution images
+        rvq_cross_entropy_loss_weight = 0., # default this to off until we are sure it is working. not totally sold that this is critical
+        dim_codebook: int = 128,
+        duration_pitch_dim: int = 512,
+        aligner_dim_in: int = 80,
+        aligner_dim_hidden: int = 512,
+        aligner_attn_channels: int = 80,
+        pitch_emb_dim: int = 256,
+        pitch_emb_pp_hidden_dim: int= 512, 
+        scale = 1. # this will be set to < 1. for better convergence when training on higher resolution images
     ):
         super().__init__()
 
         self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer)
-        self.prompt_enc = SpeechPromptEncoder(dim_codebook=128) # 128 for encodec
-        self.duration_pitch = DurationPitchPredictor(dim=512)
-        self.aligner = Aligner(dim_in = 80, dim_hidden=512, attn_channels=80)
-        self.pitch_emb = nn.Embedding(256, self.args.pp_hidden_dim)
+        self.prompt_enc = SpeechPromptEncoder(dim_codebook=dim_codebook) 
+        self.duration_pitch = DurationPitchPredictor(dim=duration_pitch_dim)
+        self.aligner = Aligner(dim_in=aligner_dim_in, dim_hidden=aligner_dim_hidden, attn_channels=aligner_attn_channels)
+        self.pitch_emb = nn.Embedding(pitch_emb_dim, pitch_emb_pp_hidden_dim)
 
         self.model = model
         self.codec = codec
@@ -1273,7 +1281,8 @@ class NaturalSpeech2(nn.Module):
         return prompt
     def expand_encodings(self, phoneme_enc, attn, pitch):
         expanded_dur = torch.einsum("klmn, kjm -> kjn", [attn, phoneme_enc])
-        pitch_emb = self.pitch_emb(f0_to_coarse(pitch).squeeze(1)).transpose(1,2)
+        pitch_emb = self.pitch_emb(rearrange(f0_to_coarse(pitch), 'b 1 t -> b t'))
+        pitch_emb = rearrange(pitch_emb, 'k 1 j -> k j 1')
         expanded_pitch = torch.einsum("klmn, kjm -> kjn", [attn, pitch_emb])
         expanded_encodings = expanded_dur + expanded_pitch
         return expanded_encodings
@@ -1310,7 +1319,7 @@ class NaturalSpeech2(nn.Module):
         audio,
         codes = None,
         prompt = None,
-        pitch = None
+        pitch = None,
         *args,
         **kwargs
     ):
@@ -1403,10 +1412,10 @@ class NaturalSpeech2(nn.Module):
 
         _, ce_loss = self.codec.rq(x_start, codes)
         # pitch and duration loss
-        duration_loss = F.l1_loss(duration, duration_pred) if exists(duration) else duration_pred
-        pitch_loss = F.l1_loss(pitch, pitch_pred) if exists(pitch) else pitch_pred
+        duration_loss = F.l1_loss(aln_hard, duration_pred) if exists(aln_hard) else 0.
+        pitch_loss = F.l1_loss(pitch, pitch_pred) if exists(pitch) else 0.
         
-        return loss + self.rvq_cross_entropy_loss_weight * ce_loss + duration_loss + pitch_loss
+        return loss + (self.rvq_cross_entropy_loss_weight * ce_loss) + duration_loss + pitch_loss
 
 # trainer
 
