@@ -29,7 +29,7 @@ from beartype.door import is_bearable
 from naturalspeech2_pytorch.attend import Attend
 from naturalspeech2_pytorch.aligner import Aligner
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
-from naturalspeech2_pytorch.utils.utils import average_over_durations
+from naturalspeech2_pytorch.utils.utils import average_over_durations, create_mask
 from naturalspeech2_pytorch.version import __version__
 
 from accelerate import Accelerator
@@ -38,12 +38,7 @@ from ema_pytorch import EMA
 from tqdm.auto import tqdm
 import pyworld as pw
 
-# constants
-f0_bin = 256
-f0_max = 1100.0
-f0_min = 50.0
-f0_mel_max = 1127 * np.log(1 + f0_max / 700)
-f0_mel_min = 1127 * np.log(1 + f0_min / 700)
+
 
 mlist = nn.ModuleList
 
@@ -115,16 +110,19 @@ def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
     )
     f0 = pw.stonemask(spec.astype(np.double), f0, t, sample_rate)
     return f0
-def f0_to_coarse(f0):
-  is_torch = isinstance(f0, torch.Tensor)
-  f0_mel = 1127 * (1 + f0 / 700).log() if is_torch else 1127 * np.log(1 + f0 / 700)
-  f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - f0_mel_min) * (f0_bin - 2) / (f0_mel_max - f0_mel_min) + 1
+def f0_to_coarse(f0, f0_bin = 256, f0_max = 1100.0, f0_min = 50.0):
+    # constants
+    f0_mel_max = 1127 * (1 + f0_max / 700).log()
+    f0_mel_min = 1127 * (1 + f0_min / 700).log()
+    # is_torch = isinstance(f0, torch.Tensor)
+    f0_mel = 1127 * (1 + f0 / 700).log()
+    f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - f0_mel_min) * (f0_bin - 2) / (f0_mel_max - f0_mel_min) + 1
 
-  f0_mel[f0_mel <= 1] = 1
-  f0_mel[f0_mel > f0_bin - 1] = f0_bin - 1
-  f0_coarse = (f0_mel + 0.5).int() if is_torch else np.rint(f0_mel).astype(int)
-  assert f0_coarse.max() <= 255 and f0_coarse.min() >= 1, (f0_coarse.max(), f0_coarse.min())
-  return f0_coarse
+    f0_mel[f0_mel <= 1] = 1
+    f0_mel[f0_mel > f0_bin - 1] = f0_bin - 1
+    f0_coarse = (f0_mel + 0.5).int()
+    assert f0_coarse.max() <= 255 and f0_coarse.min() >= 1, (f0_coarse.max(), f0_coarse.min())
+    return f0_coarse
 # peripheral models
 
 # phoneme - pitch - speech prompt - duration predictors
@@ -1315,6 +1313,7 @@ class NaturalSpeech2(nn.Module):
     def forward(
         self,
         text,
+        text_lens,
         mel,
         audio,
         codes = None,
@@ -1332,8 +1331,8 @@ class NaturalSpeech2(nn.Module):
                 self.codec.eval()
                 audio, codes, _ = self.codec(audio, return_encoded = True)
         #create mask
-        mel_mask = create_mask()
-        text_mask = create_mask()
+        mel_mask = rearrange(create_mask(mel, mel.data.max()), 'a b -> a () b')
+        text_mask = rearrange(create_mask(text_lens, text.shape[-1]), 'a b -> a () b')
         
         prompt = self.process_prompt(prompt)
         prompt_enc = self.prompt_enc(prompt)
@@ -1341,7 +1340,7 @@ class NaturalSpeech2(nn.Module):
         aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
         duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
         pitch = average_over_durations(pitch, aln_hard)
-        cond = self.expand_encodings(phoneme_enc, aln_mas.unsqueeze(1), pitch)
+        cond = self.expand_encodings(phoneme_enc, rearrange(aln_mas, 'a b -> a () b'), pitch)
         
         batch, n, d, device = *audio.shape, self.device
 
