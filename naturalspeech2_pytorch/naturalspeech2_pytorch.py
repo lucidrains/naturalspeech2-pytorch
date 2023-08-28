@@ -39,6 +39,7 @@ from tqdm.auto import tqdm
 import pyworld as pw
 
 
+# constants
 
 mlist = nn.ModuleList
 
@@ -111,7 +112,6 @@ def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
     f0 = pw.stonemask(spec.astype(np.double), f0, t, sample_rate)
     return f0
 def f0_to_coarse(f0, f0_bin = 256, f0_max = 1100.0, f0_min = 50.0):
-    # constants
     f0_mel_max = 1127 * (1 + f0_max / 700).log()
     f0_mel_min = 1127 * (1 + f0_min / 700).log()
     # is_torch = isinstance(f0, torch.Tensor)
@@ -123,6 +123,7 @@ def f0_to_coarse(f0, f0_bin = 256, f0_max = 1100.0, f0_min = 50.0):
     f0_coarse = (f0_mel + 0.5).int()
     assert f0_coarse.max() <= 255 and f0_coarse.min() >= 1, (f0_coarse.max(), f0_coarse.min())
     return f0_coarse
+
 # peripheral models
 
 # phoneme - pitch - speech prompt - duration predictors

@@ -23,6 +23,7 @@ def average_over_durations(values, durs):
 
     avg = torch.where(values_nelems == 0.0, values_nelems, values_sums / values_nelems).to(values.dtype)
     return avg
+
 def create_mask(sequence_length, max_len):
     seq_range = torch.arange(max_len, dtype=sequence_length.dtype, device=sequence_length.device)
     seq_range = rearrange(seq_range, 't -> () t')
