@@ -18,6 +18,8 @@ This repository will use denoising diffusion rather than score-based SDE, and ma
 
 - <a href="https://github.com/manmay-nakhashi">Manmay</a> for submitting the initial code for phoneme, pitch, duration, and speech prompt encoders as well as the multilingual phonemizer and phoneme aligner!
 
+- <a href="https://github.com/manmay-nakhashi">Manmay</a> for wiring up the complete end-to-end conditioning of the diffusion network!
+
 - You? If you are an aspiring ML / AI engineer or work in the TTS field and would like to contribute to open sourcing state-of-the-art, jump right in!
 
 ## Install
@@ -67,7 +69,7 @@ generated_audio = diffusion.sample(length = 1024) # (1, 327680)
 
 ```
 
-To accept prompting, you will need to instantiate `SpeechPromptEncoder` and pass it into `speech_prompt_encoder` on the `Model`
+With conditioning
 
 ex.
 
@@ -84,16 +86,12 @@ from naturalspeech2_pytorch import (
 
 codec = EncodecWrapper()
 
-prompt_encoder = SpeechPromptEncoder(
-    dim_codebook = codec.codebook_dim,
-    depth = 2
-)
-
 model = Model(
     dim = 128,
     depth = 6,
-    speech_prompt_encoder = prompt_encoder,  # pass in the SpeechPromptEncoder
-    cond_drop_prob = 0.25                    # dropout prompt conditioning with this probability, for classifier free guidance
+    dim_prompt = 512,
+    cond_drop_prob = 0.25,                  # dropout prompt conditioning with this probability, for classifier free guidance
+    condition_on_prompt = True
 )
 
 # natural speech diffusion model
@@ -102,20 +100,34 @@ diffusion = NaturalSpeech2(
     model = model,
     codec = codec,
     timesteps = 1000
-).cuda()
+)
 
 # mock raw audio data
 
-raw_audio = torch.randn(4, 327680).cuda()
-prompt = torch.randn(4, 32768).cuda()          # they randomly excised a range on the audio for the prompt during training, eventually will take care of this auto-magically
+raw_audio = torch.randn(4, 327680)
+prompt = torch.randn(4, 32768)               # they randomly excised a range on the audio for the prompt during training, eventually will take care of this auto-magically
 
-loss = diffusion(raw_audio, prompt = prompt) # pass in the prompt
+mel_len = torch.tensor([120, 60 , 80, 70])
+mel = torch.randn((4, 80, 120))
+
+text = torch.randint(0, 100, (4, 100))
+text_lens = torch.tensor([100, 50 , 80, 120])
+
+pitch = torch.randn(4, 1, 120)
+
+# forwards and backwards
+
+loss = diffusion(
+    audio = raw_audio,
+    text = text,
+    text_lens = text_lens,
+    mel = mel,
+    mel_len = mel_len,
+    pitch = pitch,
+    prompt = prompt
+)
+
 loss.backward()
-
-# do the above in a loop for a lot of raw audio data...
-# then you can sample from your generative model as so
-
-generated_audio = diffusion.sample(length = 1024, prompt = prompt, cond_scale = 3.) # pass in your prompt - classifier free guidance scale of 3 (1 would be no classifier free guidance)
 ```
 
 Or if you want a `Trainer` class to take care of the training and sampling loop, just simply do

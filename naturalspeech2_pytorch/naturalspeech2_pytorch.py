@@ -111,10 +111,11 @@ def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
     )
     f0 = pw.stonemask(spec.astype(np.double), f0, t, sample_rate)
     return f0
+
 def f0_to_coarse(f0, f0_bin = 256, f0_max = 1100.0, f0_min = 50.0):
     f0_mel_max = 1127 * torch.log(1 + torch.tensor(f0_max) / 700)
     f0_mel_min = 1127 * torch.log(1 + torch.tensor(f0_min) / 700)
-    # is_torch = isinstance(f0, torch.Tensor)
+
     f0_mel = 1127 * (1 + f0 / 700).log()
     f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - f0_mel_min) * (f0_bin - 2) / (f0_mel_max - f0_mel_min) + 1
 
@@ -730,7 +731,7 @@ class Model(nn.Module):
         num_latents_m = 32,   # number of latents to be perceiver resampled ('q-k-v' with 'm' queries in the paper)
         resampler_depth = 2,
         cond_drop_prob = 0.,
-        condition_on_prompt= True
+        condition_on_prompt= False
     ):
         super().__init__()
         self.dim = dim
@@ -1053,11 +1054,14 @@ class NaturalSpeech2(nn.Module):
     ):
         super().__init__()
 
-        self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer, num_tokens=150)
-        self.prompt_enc = SpeechPromptEncoder(dim_codebook=dim_codebook) 
-        self.duration_pitch = DurationPitchPredictor(dim=duration_pitch_dim)
-        self.aligner = Aligner(dim_in=aligner_dim_in, dim_hidden=aligner_dim_hidden, attn_channels=aligner_attn_channels)
-        self.pitch_emb = nn.Embedding(pitch_emb_dim, pitch_emb_pp_hidden_dim)
+        self.conditional = model.condition_on_prompt
+
+        if self.conditional:
+            self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer, num_tokens=150)
+            self.prompt_enc = SpeechPromptEncoder(dim_codebook=dim_codebook) 
+            self.duration_pitch = DurationPitchPredictor(dim=duration_pitch_dim)
+            self.aligner = Aligner(dim_in=aligner_dim_in, dim_hidden=aligner_dim_hidden, attn_channels=aligner_attn_channels)
+            self.pitch_emb = nn.Embedding(pitch_emb_dim, pitch_emb_pp_hidden_dim)
 
         self.model = model
         self.codec = codec
@@ -1269,13 +1273,15 @@ class NaturalSpeech2(nn.Module):
                 prompt, _, _ = self.codec(prompt, curtail_from_left = True, return_encoded = True)
 
         return prompt
+
     def expand_encodings(self, phoneme_enc, attn, pitch):
-        expanded_dur = torch.einsum("klmn, kjm -> kjn", [attn, phoneme_enc])
+        expanded_dur = einsum('k l m n, k j m -> k j n', attn, phoneme_enc)
         pitch_emb = self.pitch_emb(rearrange(f0_to_coarse(pitch), 'b 1 t -> b t'))
         pitch_emb = rearrange(pitch_emb, 'b t d -> b d t')
-        expanded_pitch = torch.einsum("klmn, kjm -> kjn", [attn, pitch_emb])
+        expanded_pitch = einsum('k l m n, k j m -> k j n', attn, pitch_emb)
         expanded_encodings = expanded_dur + expanded_pitch
         return expanded_encodings
+
     @torch.no_grad()
     def sample(
         self,
@@ -1304,11 +1310,11 @@ class NaturalSpeech2(nn.Module):
 
     def forward(
         self,
-        text,
-        text_lens,
-        mel,
-        mel_len,
         audio,
+        text = None,
+        text_lens = None,
+        mel = None,
+        mel_len = None,
         codes = None,
         prompt = None,
         pitch = None,
@@ -1323,17 +1329,24 @@ class NaturalSpeech2(nn.Module):
             with torch.no_grad():
                 self.codec.eval()
                 audio, codes, _ = self.codec(audio, return_encoded = True)
-        #create mask
-        mel_mask = rearrange(create_mask(mel_len, mel_len.data.max()), 'a b -> a () b')
-        text_mask = rearrange(create_mask(text_lens, text.shape[-1]), 'a b -> a () b')
-        
-        prompt = self.process_prompt(prompt)
-        prompt_enc = self.prompt_enc(prompt)
-        phoneme_enc = self.phoneme_enc(text)
-        aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
-        duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
-        pitch = average_over_durations(pitch, aln_hard)
-        cond = self.expand_encodings(rearrange(phoneme_enc, 'b t d -> b d t'), rearrange(aln_mas, 'a b c -> a () b c'), pitch)
+
+        prompt_enc = None
+        cond = None
+
+        if self.conditional:
+            #create mask
+
+            mel_mask = rearrange(create_mask(mel_len, mel_len.data.max()), 'a b -> a 1 b')
+            text_mask = rearrange(create_mask(text_lens, text.shape[-1]), 'a b -> a 1 b')
+            
+            prompt = self.process_prompt(prompt)
+            prompt_enc = self.prompt_enc(prompt)
+            phoneme_enc = self.phoneme_enc(text)
+
+            aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
+            duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
+            pitch = average_over_durations(pitch, aln_hard)
+            cond = self.expand_encodings(rearrange(phoneme_enc, 'b t d -> b d t'), rearrange(aln_mas, 'a b c -> a () b c'), pitch)
         
         batch, n, d, device = *audio.shape, self.device
 
