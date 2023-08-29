@@ -152,7 +152,7 @@ class Aligner(nn.Module):
                                   temperature = self.temperature)
     def forward(self, x, x_mask, y, y_mask):
         attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
-        alignment_soft, alignment_logprob = self.aligner(y.transpose(1, 2), x, x_mask)
+        alignment_soft, alignment_logprob = self.aligner(y, x.transpose(1, 2), x_mask)
         alignment_soft = rearrange(alignment_soft, 'b 1 c t -> b t c')
         alignment_mas = maximum_path(
             alignment_soft.contiguous(),

@@ -112,8 +112,8 @@ def compute_pitch(spec, sample_rate, hop_length, pitch_fmax=640.0):
     f0 = pw.stonemask(spec.astype(np.double), f0, t, sample_rate)
     return f0
 def f0_to_coarse(f0, f0_bin = 256, f0_max = 1100.0, f0_min = 50.0):
-    f0_mel_max = 1127 * (1 + f0_max / 700).log()
-    f0_mel_min = 1127 * (1 + f0_min / 700).log()
+    f0_mel_max = 1127 * torch.log(1 + torch.tensor(f0_max) / 700)
+    f0_mel_min = 1127 * torch.log(1 + torch.tensor(f0_min) / 700)
     # is_torch = isinstance(f0, torch.Tensor)
     f0_mel = 1127 * (1 + f0 / 700).log()
     f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - f0_mel_min) * (f0_bin - 2) / (f0_mel_max - f0_mel_min) + 1
@@ -135,7 +135,7 @@ class PhonemeEncoder(nn.Module):
         tokenizer: Optional[Tokenizer] = None,
         num_tokens = None,
         dim = 512,
-        dim_hidden = 1024,
+        dim_hidden = 512,
         kernel_size = 9,
         depth = 6,
         dim_head = 64,
@@ -197,7 +197,7 @@ class SpeechPromptEncoder(nn.Module):
         dim_codebook,
         dims: Tuple[int] = (256, 2048, 2048, 2048, 2048, 512, 512, 512),
         *,
-        depth,
+        depth = 6,
         heads = 8,
         dim_head = 64,
         dropout = 0.2,
@@ -443,7 +443,7 @@ class PerceiverResampler(nn.Module):
         dim_head = 64,
         heads = 8,
         ff_mult = 4,
-        use_flash_attn = True
+        use_flash_attn = False
     ):
         super().__init__()
         dim_context = default(dim_context, dim)
@@ -726,11 +726,11 @@ class Model(nn.Module):
         wavenet_stacks = 4,
         dim_cond_mult = 4,
         use_flash_attn = True,
-        speech_prompt_encoder: Optional[SpeechPromptEncoder] = None,
         dim_prompt = None,
         num_latents_m = 32,   # number of latents to be perceiver resampled ('q-k-v' with 'm' queries in the paper)
         resampler_depth = 2,
-        cond_drop_prob = 0.
+        cond_drop_prob = 0.,
+        condition_on_prompt= True
     ):
         super().__init__()
         self.dim = dim
@@ -746,19 +746,11 @@ class Model(nn.Module):
         )
 
         # prompt condition
-
-        condition_on_prompt = exists(speech_prompt_encoder)
-
         self.cond_drop_prob = cond_drop_prob # for classifier free guidance
         self.condition_on_prompt = condition_on_prompt
         self.to_prompt_cond = None
 
         if self.condition_on_prompt:
-            dim_prompt = default(dim_prompt, speech_prompt_encoder.dim_out)
-
-            self.speech_prompt_encoder = speech_prompt_encoder
-            assert speech_prompt_encoder.dim_out == dim_prompt
-
             self.null_prompt_cond = nn.Parameter(torch.randn(dim_time))
             self.null_prompt_tokens = nn.Parameter(torch.randn(num_latents_m, dim))
 
@@ -833,6 +825,7 @@ class Model(nn.Module):
         times,
         prompt = None,
         prompt_mask = None,
+        cond= None,
         cond_drop_prob = None
     ):
         b = x.shape[0]
@@ -845,9 +838,7 @@ class Model(nn.Module):
 
         if exists(self.to_prompt_cond):
             assert exists(prompt)
-            encoded_prompt = self.speech_prompt_encoder(prompt)
-
-            prompt_cond = self.to_prompt_cond(encoded_prompt)
+            prompt_cond = self.to_prompt_cond(prompt)
 
             prompt_cond = torch.where(
                 rearrange(drop_mask, 'b -> b 1'),
@@ -857,7 +848,7 @@ class Model(nn.Module):
 
             t = torch.cat((t, prompt_cond), dim = -1)
 
-            resampled_prompt_tokens = self.perceiver_resampler(encoded_prompt, mask = prompt_mask)
+            resampled_prompt_tokens = self.perceiver_resampler(prompt, mask = prompt_mask)
 
             c = torch.where(
                 rearrange(drop_mask, 'b -> b 1 1'),
@@ -1062,7 +1053,7 @@ class NaturalSpeech2(nn.Module):
     ):
         super().__init__()
 
-        self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer)
+        self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer, num_tokens=150)
         self.prompt_enc = SpeechPromptEncoder(dim_codebook=dim_codebook) 
         self.duration_pitch = DurationPitchPredictor(dim=duration_pitch_dim)
         self.aligner = Aligner(dim_in=aligner_dim_in, dim_hidden=aligner_dim_hidden, attn_channels=aligner_attn_channels)
@@ -1281,7 +1272,7 @@ class NaturalSpeech2(nn.Module):
     def expand_encodings(self, phoneme_enc, attn, pitch):
         expanded_dur = torch.einsum("klmn, kjm -> kjn", [attn, phoneme_enc])
         pitch_emb = self.pitch_emb(rearrange(f0_to_coarse(pitch), 'b 1 t -> b t'))
-        pitch_emb = rearrange(pitch_emb, 'k 1 j -> k j 1')
+        pitch_emb = rearrange(pitch_emb, 'b t d -> b d t')
         expanded_pitch = torch.einsum("klmn, kjm -> kjn", [attn, pitch_emb])
         expanded_encodings = expanded_dur + expanded_pitch
         return expanded_encodings
@@ -1316,6 +1307,7 @@ class NaturalSpeech2(nn.Module):
         text,
         text_lens,
         mel,
+        mel_len,
         audio,
         codes = None,
         prompt = None,
@@ -1332,7 +1324,7 @@ class NaturalSpeech2(nn.Module):
                 self.codec.eval()
                 audio, codes, _ = self.codec(audio, return_encoded = True)
         #create mask
-        mel_mask = rearrange(create_mask(mel, mel.data.max()), 'a b -> a () b')
+        mel_mask = rearrange(create_mask(mel_len, mel_len.data.max()), 'a b -> a () b')
         text_mask = rearrange(create_mask(text_lens, text.shape[-1]), 'a b -> a () b')
         
         prompt = self.process_prompt(prompt)
@@ -1341,7 +1333,7 @@ class NaturalSpeech2(nn.Module):
         aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
         duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
         pitch = average_over_durations(pitch, aln_hard)
-        cond = self.expand_encodings(phoneme_enc, rearrange(aln_mas, 'a b -> a () b'), pitch)
+        cond = self.expand_encodings(rearrange(phoneme_enc, 'b t d -> b d t'), rearrange(aln_mas, 'a b c -> a () b c'), pitch)
         
         batch, n, d, device = *audio.shape, self.device
 
@@ -1363,7 +1355,7 @@ class NaturalSpeech2(nn.Module):
 
         # predict and take gradient step
 
-        pred = self.model(noised_audio, times, prompt = prompt, cond=cond)
+        pred = self.model(noised_audio, times, prompt = prompt_enc, cond=cond)
 
         if self.objective == 'eps':
             target = noise
