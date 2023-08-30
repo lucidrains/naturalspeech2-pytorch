@@ -1314,14 +1314,14 @@ class NaturalSpeech2(nn.Module):
         text = None,
         text_lens = None,
         mel = None,
-        mel_len = None,
+        mel_lens = None,
         codes = None,
         prompt = None,
         pitch = None,
         *args,
         **kwargs
     ):
-        is_raw_audio = audio.ndim == 2
+        batch, is_raw_audio = audio.shape[0], audio.ndim == 2
 
         assert not (is_raw_audio and not exists(self.codec)), 'codec must be passed in if one were to train on raw audio'
 
@@ -1334,10 +1334,19 @@ class NaturalSpeech2(nn.Module):
         cond = None
 
         if self.conditional:
-            #create mask
+            assert exists(mel) and exists(text) and exists(pitch)
 
-            mel_mask = rearrange(create_mask(mel_len, mel_len.data.max()), 'a b -> a 1 b')
-            text_mask = rearrange(create_mask(text_lens, text.shape[-1]), 'a b -> a 1 b')
+            mel_max_length = mel.shape[-1]
+            text_max_length = text.shape[-1]
+
+            if not exists(mel_lens):
+                mel_lens = torch.full((batch,), mel_max_length, device = self.device, dtype = torch.long)
+
+            if not exists(text_lens):
+                text_lens = torch.full((batch,), text_max_length, device = self.device, dtype = torch.long)
+
+            mel_mask = rearrange(create_mask(mel_lens, mel_max_length), 'b n -> b 1 n')
+            text_mask = rearrange(create_mask(text_lens, text_max_length), 'b n -> b 1 n')
             
             prompt = self.process_prompt(prompt)
             prompt_enc = self.prompt_enc(prompt)
@@ -1345,8 +1354,9 @@ class NaturalSpeech2(nn.Module):
 
             aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
             duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
+
             pitch = average_over_durations(pitch, aln_hard)
-            cond = self.expand_encodings(rearrange(phoneme_enc, 'b t d -> b d t'), rearrange(aln_mas, 'a b c -> a () b c'), pitch)
+            cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mas, 'b n c -> b 1 n c'), pitch)
         
         batch, n, d, device = *audio.shape, self.device
 

@@ -1,5 +1,6 @@
 import torch
 from einops import repeat, rearrange
+
 def average_over_durations(values, durs):
     """
         - in:
@@ -25,7 +26,8 @@ def average_over_durations(values, durs):
     return avg
 
 def create_mask(sequence_length, max_len):
-    seq_range = torch.arange(max_len, dtype=sequence_length.dtype, device=sequence_length.device)
-    seq_range = rearrange(seq_range, 't -> () t')
-    sequence_length = rearrange(sequence_length, 'b -> b ()')
+    dtype, device = sequence_length.dtype, sequence_length.device
+    seq_range = torch.arange(max_len, dtype=dtype, device=device)
+    sequence_length = rearrange(sequence_length, 'b -> b 1')
+    seq_range = rearrange(seq_range, 't -> 1 t')
     return seq_range < sequence_length
