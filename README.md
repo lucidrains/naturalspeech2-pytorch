@@ -128,6 +128,17 @@ loss = diffusion(
 )
 
 loss.backward()
+
+# after much training
+
+generated_audio = diffusion.sample(
+    length = 1024,
+    text = text,
+    mel = mel,
+    mel_lens = mel_lens,
+    pitch = pitch,
+    prompt = prompt
+) # (1, 327680)
 ```
 
 Or if you want a `Trainer` class to take care of the training and sampling loop, just simply do
