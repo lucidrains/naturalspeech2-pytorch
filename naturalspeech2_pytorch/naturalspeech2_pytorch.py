@@ -15,6 +15,7 @@ from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 
 import torchaudio
+import torchaudio.transforms as T
 
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange, Reduce
@@ -37,7 +38,6 @@ from ema_pytorch import EMA
 
 from tqdm.auto import tqdm
 import pyworld as pw
-
 
 # constants
 
@@ -126,6 +126,53 @@ def f0_to_coarse(f0, f0_bin = 256, f0_max = 1100.0, f0_min = 50.0):
     return f0_coarse
 
 # peripheral models
+
+# audio to mel
+
+class AudioToMel(nn.Module):
+    def __init__(
+        self,
+        *,
+        n_mels = 100,
+        sampling_rate = 24000,
+        f_max = 8000,
+        n_fft = 1024,
+        win_length = 640,
+        hop_length = 160,
+        log = True
+    ):
+        super().__init__()
+        self.log = log
+        self.n_mels = n_mels
+        self.n_fft = n_fft
+        self.f_max = f_max
+        self.win_length = win_length
+        self.hop_length = hop_length
+        self.sampling_rate = sampling_rate
+
+    def forward(self, audio):
+        stft_transform = T.Spectrogram(
+            n_fft = self.n_fft,
+            win_length = self.win_length,
+            hop_length = self.hop_length,
+            window_fn = torch.hann_window
+        )
+
+        spectrogram = stft_transform(audio)
+
+        mel_transform = T.MelScale(
+            n_mels = self.n_mels,
+            sample_rate = self.sampling_rate,
+            n_stft = self.n_fft // 2 + 1,
+            f_max = self.f_max
+        )
+
+        mel = mel_transform(spectrogram)
+
+        if self.log:
+            mel = T.AmplitudeToDB()(mel)
+
+        return mel
 
 # phoneme - pitch - speech prompt - duration predictors
 
@@ -1048,20 +1095,17 @@ class NaturalSpeech2(nn.Module):
         aligner_dim_in: int = 80,
         aligner_dim_hidden: int = 512,
         aligner_attn_channels: int = 80,
+        num_phoneme_tokens: int = 150,
         pitch_emb_dim: int = 256,
-        pitch_emb_pp_hidden_dim: int= 512, 
+        pitch_emb_pp_hidden_dim: int= 512,
+        audio_to_mel_kwargs: dict = dict(),
         scale = 1. # this will be set to < 1. for better convergence when training on higher resolution images
     ):
         super().__init__()
 
         self.conditional = model.condition_on_prompt
 
-        if self.conditional:
-            self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer, num_tokens=150)
-            self.prompt_enc = SpeechPromptEncoder(dim_codebook=dim_codebook) 
-            self.duration_pitch = DurationPitchPredictor(dim=duration_pitch_dim)
-            self.aligner = Aligner(dim_in=aligner_dim_in, dim_hidden=aligner_dim_hidden, attn_channels=aligner_attn_channels)
-            self.pitch_emb = nn.Embedding(pitch_emb_dim, pitch_emb_pp_hidden_dim)
+        # model and codec
 
         self.model = model
         self.codec = codec
@@ -1074,6 +1118,25 @@ class NaturalSpeech2(nn.Module):
         if exists(codec):
             self.target_sample_hz = codec.target_sample_hz
             self.seq_len_multiple_of = codec.seq_len_multiple_of
+
+        # preparation for conditioning
+
+        if self.conditional:
+            if exists(self.target_sample_hz):
+                audio_to_mel_kwargs.update(sampling_rate = self.target_sample_hz)
+
+            self.audio_to_mel = AudioToMel(
+                n_mels = aligner_dim_in,
+                **audio_to_mel_kwargs
+            )
+
+            self.phoneme_enc = PhonemeEncoder(tokenizer=tokenizer, num_tokens=num_phoneme_tokens)
+            self.prompt_enc = SpeechPromptEncoder(dim_codebook=dim_codebook)
+            self.duration_pitch = DurationPitchPredictor(dim=duration_pitch_dim)
+            self.aligner = Aligner(dim_in=aligner_dim_in, dim_hidden=aligner_dim_hidden, attn_channels=aligner_attn_channels)
+            self.pitch_emb = nn.Embedding(pitch_emb_dim, pitch_emb_pp_hidden_dim)
+
+        # rest of ddpm
 
         assert not exists(codec) or model.dim == codec.codebook_dim, f'transformer model dimension {model.dim} must be equal to codec dimension {codec.codebook_dim}'
 
@@ -1323,34 +1386,40 @@ class NaturalSpeech2(nn.Module):
     ):
         batch, is_raw_audio = audio.shape[0], audio.ndim == 2
 
-        assert not (is_raw_audio and not exists(self.codec)), 'codec must be passed in if one were to train on raw audio'
-
-        if is_raw_audio:
-            with torch.no_grad():
-                self.codec.eval()
-                audio, codes, _ = self.codec(audio, return_encoded = True)
+        # compute the prompt encoding and cond
 
         prompt_enc = None
         cond = None
 
         if self.conditional:
-            assert exists(mel) and exists(text) and exists(pitch)
-
-            mel_max_length = mel.shape[-1]
+            assert exists(text) and exists(pitch) # eventually make pitch automatically computed if not passed in
             text_max_length = text.shape[-1]
-
-            if not exists(mel_lens):
-                mel_lens = torch.full((batch,), mel_max_length, device = self.device, dtype = torch.long)
 
             if not exists(text_lens):
                 text_lens = torch.full((batch,), text_max_length, device = self.device, dtype = torch.long)
 
-            mel_mask = rearrange(create_mask(mel_lens, mel_max_length), 'b n -> b 1 n')
             text_mask = rearrange(create_mask(text_lens, text_max_length), 'b n -> b 1 n')
-            
+
             prompt = self.process_prompt(prompt)
             prompt_enc = self.prompt_enc(prompt)
             phoneme_enc = self.phoneme_enc(text)
+
+            # process mel
+
+            if not exists(mel):
+                assert is_raw_audio
+
+                mel = self.audio_to_mel(audio)
+                mel = mel[..., :text_max_length]
+
+            mel_max_length = mel.shape[-1]
+
+            if not exists(mel_lens):
+                mel_lens = torch.full((batch,), mel_max_length, device = self.device, dtype = torch.long)
+
+            mel_mask = rearrange(create_mask(mel_lens, mel_max_length), 'b n -> b 1 n')
+
+            # alignment
 
             aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
             duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
@@ -1358,6 +1427,17 @@ class NaturalSpeech2(nn.Module):
             pitch = average_over_durations(pitch, aln_hard)
             cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mas, 'b n c -> b 1 n c'), pitch)
         
+        # automatically encode raw audio to residual vq with codec
+
+        assert not (is_raw_audio and not exists(self.codec)), 'codec must be passed in if one were to train on raw audio'
+
+        if is_raw_audio:
+            with torch.no_grad():
+                self.codec.eval()
+                audio, codes, _ = self.codec(audio, return_encoded = True)
+
+        # shapes and device
+
         batch, n, d, device = *audio.shape, self.device
 
         assert d == self.dim, f'codec codebook dimension {d} must match model dimensions {self.dim}'
@@ -1378,7 +1458,7 @@ class NaturalSpeech2(nn.Module):
 
         # predict and take gradient step
 
-        pred = self.model(noised_audio, times, prompt = prompt_enc, cond=cond)
+        pred = self.model(noised_audio, times, prompt = prompt_enc, cond = cond)
 
         if self.objective == 'eps':
             target = noise
