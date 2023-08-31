@@ -1099,7 +1099,9 @@ class NaturalSpeech2(nn.Module):
         pitch_emb_dim: int = 256,
         pitch_emb_pp_hidden_dim: int= 512,
         audio_to_mel_kwargs: dict = dict(),
-        scale = 1. # this will be set to < 1. for better convergence when training on higher resolution images
+        scale = 1., # this will be set to < 1. for better convergence when training on higher resolution images
+        duration_loss_weight = 1.,
+        pitch_loss_weight = 1.
     ):
         super().__init__()
 
@@ -1183,6 +1185,11 @@ class NaturalSpeech2(nn.Module):
         # weight of the cross entropy loss to residual vq codebooks
 
         self.rvq_cross_entropy_loss_weight = rvq_cross_entropy_loss_weight
+
+        # loss weight for duration and pitch
+
+        self.duration_loss_weight = duration_loss_weight
+        self.pitch_loss_weight = pitch_loss_weight
 
     @property
     def device(self):
@@ -1389,12 +1396,23 @@ class NaturalSpeech2(nn.Module):
         # alignment
 
         aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
-        duration_pred, pitch_pred = self.duration_pitch(phoneme_enc,prompt_enc)
+        duration_pred, pitch_pred = self.duration_pitch(phoneme_enc, prompt_enc)
 
         pitch = average_over_durations(pitch, aln_hard)
         cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mas, 'b n c -> b 1 n c'), pitch)
 
-        return prompt_enc, cond
+        # pitch and duration loss
+
+        duration_loss = F.l1_loss(aln_hard, duration_pred)
+
+        pitch = rearrange(pitch, 'b 1 d -> b d')
+        pitch_loss = F.l1_loss(pitch, pitch_pred)
+
+        # weigh the losses
+
+        aux_loss = duration_loss * self.duration_loss_weight + pitch_loss + self.pitch_loss_weight
+
+        return prompt_enc, cond, aux_loss
 
     def expand_encodings(self, phoneme_enc, attn, pitch):
         expanded_dur = einsum('k l m n, k j m -> k j n', attn, phoneme_enc)
@@ -1427,7 +1445,7 @@ class NaturalSpeech2(nn.Module):
         if self.conditional:
             assert exists(mel)
 
-            prompt_enc, cond = self.process_conditioning(
+            prompt_enc, cond, _ = self.process_conditioning(
                 prompt = prompt,
                 text = text,
                 pitch = pitch,
@@ -1473,9 +1491,10 @@ class NaturalSpeech2(nn.Module):
 
         prompt_enc = None
         cond = None
+        duration_pitch_loss = 0.
 
         if self.conditional:
-            prompt_enc, cond = self.process_conditioning(
+            prompt_enc, cond, duration_pitch_loss = self.process_conditioning(
                 audio = audio,
                 prompt = prompt,
                 text = text,
@@ -1565,12 +1584,7 @@ class NaturalSpeech2(nn.Module):
 
         _, ce_loss = self.codec.rq(x_start, codes)
 
-        # pitch and duration loss
-
-        duration_loss = F.l1_loss(aln_hard, duration_pred) if exists(aln_hard) else 0.
-        pitch_loss = F.l1_loss(pitch, pitch_pred) if exists(pitch) else 0.
-        
-        return loss + (self.rvq_cross_entropy_loss_weight * ce_loss) + duration_loss + pitch_loss
+        return loss + (self.rvq_cross_entropy_loss_weight * ce_loss) + duration_pitch_loss
 
 # trainer
 
