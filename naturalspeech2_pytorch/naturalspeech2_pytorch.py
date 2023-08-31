@@ -28,7 +28,7 @@ from beartype.typing import Tuple, Union, Optional, List
 from beartype.door import is_bearable
 
 from naturalspeech2_pytorch.attend import Attend
-from naturalspeech2_pytorch.aligner import Aligner
+from naturalspeech2_pytorch.aligner import Aligner, ForwardSumLoss
 from naturalspeech2_pytorch.utils.tokenizer import Tokenizer, ESpeak
 from naturalspeech2_pytorch.utils.utils import average_over_durations, create_mask
 from naturalspeech2_pytorch.version import __version__
@@ -1101,7 +1101,8 @@ class NaturalSpeech2(nn.Module):
         audio_to_mel_kwargs: dict = dict(),
         scale = 1., # this will be set to < 1. for better convergence when training on higher resolution images
         duration_loss_weight = 1.,
-        pitch_loss_weight = 1.
+        pitch_loss_weight = 1.,
+        aligner_loss_weight = 1.
     ):
         super().__init__()
 
@@ -1137,6 +1138,7 @@ class NaturalSpeech2(nn.Module):
             self.duration_pitch = DurationPitchPredictor(dim=duration_pitch_dim)
             self.aligner = Aligner(dim_in=aligner_dim_in, dim_hidden=aligner_dim_hidden, attn_channels=aligner_attn_channels)
             self.pitch_emb = nn.Embedding(pitch_emb_dim, pitch_emb_pp_hidden_dim)
+            self.aligner_loss = ForwardSumLoss()
 
         # rest of ddpm
 
@@ -1190,6 +1192,7 @@ class NaturalSpeech2(nn.Module):
 
         self.duration_loss_weight = duration_loss_weight
         self.pitch_loss_weight = pitch_loss_weight
+        self.aligner_loss_weight = aligner_loss_weight
 
     @property
     def device(self):
@@ -1407,10 +1410,12 @@ class NaturalSpeech2(nn.Module):
 
         pitch = rearrange(pitch, 'b 1 d -> b d')
         pitch_loss = F.l1_loss(pitch, pitch_pred)
-
+        aligner_loss = self.aligner_loss(aln_log, text_lens, mel_lens)
         # weigh the losses
 
-        aux_loss = duration_loss * self.duration_loss_weight + pitch_loss + self.pitch_loss_weight
+        aux_loss = (duration_loss * self.duration_loss_weight) \
+                    + (pitch_loss * self.pitch_loss_weight) \
+                    + (aligner_loss * self.aligner_loss_weight)
 
         return prompt_enc, cond, aux_loss
 
