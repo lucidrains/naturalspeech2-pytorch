@@ -90,10 +90,10 @@ class LearnedSinusoidalPosEmb(nn.Module):
 
 # compute pitch
 
-def compute_pitch_pytorch(wav, sr):
+def compute_pitch_pytorch(wav, sample_rate):
     #https://pytorch.org/audio/main/generated/torchaudio.functional.compute_kaldi_pitch.html#torchaudio.functional.compute_kaldi_pitch
-    pitch_feature = F.compute_kaldi_pitch(wav, sr)
-    pitch, nfcc = pitch_feature[..., 0], pitch_feature[..., 1]
+    pitch_feature = torchaudio.functional.compute_kaldi_pitch(wav, sample_rate)
+    pitch, nfcc = pitch_feature.unbind(dim = -1)
     return pitch
 
 #as mentioned in paper using pyworld
@@ -1350,7 +1350,7 @@ class NaturalSpeech2(nn.Module):
     ):
         batch = prompt.shape[0]
 
-        assert exists(text) and exists(pitch) # eventually make pitch automatically computed if not passed in
+        assert exists(text)
         text_max_length = text.shape[-1]
 
         if not exists(text_lens):
@@ -1361,6 +1361,15 @@ class NaturalSpeech2(nn.Module):
         prompt = self.process_prompt(prompt)
         prompt_enc = self.prompt_enc(prompt)
         phoneme_enc = self.phoneme_enc(text)
+
+        # process pitch
+
+        if not exists(pitch):
+            assert exists(audio) and audio.ndim == 2
+            assert exists(self.target_sample_hz)
+
+            pitch = compute_pitch_pytorch(audio, self.target_sample_hz)
+            pitch = rearrange(pitch, 'b n -> b 1 n')
 
         # process mel
 
@@ -1555,7 +1564,9 @@ class NaturalSpeech2(nn.Module):
             x_start = alpha * audio - sigma * pred
 
         _, ce_loss = self.codec.rq(x_start, codes)
+
         # pitch and duration loss
+
         duration_loss = F.l1_loss(aln_hard, duration_pred) if exists(aln_hard) else 0.
         pitch_loss = F.l1_loss(pitch, pitch_pred) if exists(pitch) else 0.
         
