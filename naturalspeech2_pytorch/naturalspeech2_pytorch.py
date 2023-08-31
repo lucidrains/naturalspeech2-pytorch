@@ -72,6 +72,23 @@ def prob_mask_like(shape, prob, device):
     else:
         return torch.zeros(shape, device = device).float().uniform_(0, 1) < prob
 
+def generate_mask_from_lengths(lengths):
+    src = lengths.int()
+    device = src.device
+    tgt_length = src.sum(dim = -1).amax().item()
+
+    cumsum = src.cumsum(dim = -1)
+    cumsum_exclusive = F.pad(cumsum, (1, -1), value = 0.)
+
+    tgt_arange = torch.arange(tgt_length, device = device)
+    tgt_arange = repeat(tgt_arange, '... j -> ... i j', i = src.shape[-1])
+
+    cumsum = rearrange(cumsum, '... i -> ... i 1')
+    cumsum_exclusive = rearrange(cumsum_exclusive, '... i -> ... i 1')
+
+    mask = (tgt_arange < cumsum) & (tgt_arange >= cumsum_exclusive)
+    return mask
+
 # sinusoidal positional embeds
 
 class LearnedSinusoidalPosEmb(nn.Module):
@@ -1347,78 +1364,6 @@ class NaturalSpeech2(nn.Module):
 
         return prompt
 
-    def process_conditioning(
-        self,
-        *,
-        prompt,
-        audio = None,
-        pitch = None,
-        text = None,
-        text_lens = None,
-        mel = None,
-        mel_lens = None
-    ):
-        batch = prompt.shape[0]
-
-        assert exists(text)
-        text_max_length = text.shape[-1]
-
-        if not exists(text_lens):
-            text_lens = torch.full((batch,), text_max_length, device = self.device, dtype = torch.long)
-
-        text_mask = rearrange(create_mask(text_lens, text_max_length), 'b n -> b 1 n')
-
-        prompt = self.process_prompt(prompt)
-        prompt_enc = self.prompt_enc(prompt)
-        phoneme_enc = self.phoneme_enc(text)
-
-        # process pitch
-
-        if not exists(pitch):
-            assert exists(audio) and audio.ndim == 2
-            assert exists(self.target_sample_hz)
-
-            pitch = compute_pitch_pytorch(audio, self.target_sample_hz)
-            pitch = rearrange(pitch, 'b n -> b 1 n')
-
-        # process mel
-
-        if not exists(mel):
-            assert exists(audio) and audio.ndim == 2
-
-            mel = self.audio_to_mel(audio)
-            mel = mel[..., :text_max_length]
-
-        mel_max_length = mel.shape[-1]
-
-        if not exists(mel_lens):
-            mel_lens = torch.full((batch,), mel_max_length, device = self.device, dtype = torch.long)
-
-        mel_mask = rearrange(create_mask(mel_lens, mel_max_length), 'b n -> b 1 n')
-
-        # alignment
-
-        aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
-        duration_pred, pitch_pred = self.duration_pitch(phoneme_enc, prompt_enc)
-
-        pitch = average_over_durations(pitch, aln_hard)
-        cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mas, 'b n c -> b 1 n c'), pitch)
-
-        # pitch and duration loss
-
-        duration_loss = F.l1_loss(aln_hard, duration_pred)
-
-        pitch = rearrange(pitch, 'b 1 d -> b d')
-        pitch_loss = F.l1_loss(pitch, pitch_pred)
-        aligner_loss = self.aligner_loss(aln_log, text_lens, mel_lens)
-        # weigh the losses
-
-        aux_loss = (duration_loss * self.duration_loss_weight) \
-                    + (pitch_loss * self.pitch_loss_weight) \
-                    + (aligner_loss * self.aligner_loss_weight)
-
-        return prompt_enc, cond, aux_loss
-
     def expand_encodings(self, phoneme_enc, attn, pitch):
         expanded_dur = einsum('k l m n, k j m -> k j n', attn, phoneme_enc)
         pitch_emb = self.pitch_emb(rearrange(f0_to_coarse(pitch), 'b 1 t -> b t'))
@@ -1435,29 +1380,25 @@ class NaturalSpeech2(nn.Module):
         prompt = None,
         batch_size = 1,
         cond_scale = 1.,
-        pitch = None,
         text = None,
         text_lens = None,
-        mel = None,
-        mel_lens = None,
     ):
         sample_fn = self.ddpm_sample if not self.use_ddim else self.ddim_sample
-
-        prompt = self.process_prompt(prompt)
 
         prompt_enc = cond = None
 
         if self.conditional:
-            assert exists(mel)
+            assert exists(prompt) and exists(text)
+            prompt = self.process_prompt(prompt)
+            prompt_enc = self.prompt_enc(prompt)
+            phoneme_enc = self.phoneme_enc(text)
 
-            prompt_enc, cond, _ = self.process_conditioning(
-                prompt = prompt,
-                text = text,
-                pitch = pitch,
-                mel = mel,
-                text_lens = text_lens,
-                mel_lens = mel_lens
-            )
+            duration, pitch = self.duration_pitch(phoneme_enc, prompt_enc)
+            pitch = rearrange(pitch, 'b n -> b 1 n')
+
+            aln_mask = generate_mask_from_lengths(duration).float()
+
+            cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mask, 'b n c -> b 1 n c'), pitch)
 
         if exists(prompt):
             batch_size = prompt.shape[0]
@@ -1499,15 +1440,63 @@ class NaturalSpeech2(nn.Module):
         duration_pitch_loss = 0.
 
         if self.conditional:
-            prompt_enc, cond, duration_pitch_loss = self.process_conditioning(
-                audio = audio,
-                prompt = prompt,
-                text = text,
-                pitch = pitch,
-                mel = mel,
-                text_lens = text_lens,
-                mel_lens = mel_lens
-            )
+            batch = prompt.shape[0]
+
+            assert exists(text)
+            text_max_length = text.shape[-1]
+
+            if not exists(text_lens):
+                text_lens = torch.full((batch,), text_max_length, device = self.device, dtype = torch.long)
+
+            text_mask = rearrange(create_mask(text_lens, text_max_length), 'b n -> b 1 n')
+
+            prompt = self.process_prompt(prompt)
+            prompt_enc = self.prompt_enc(prompt)
+            phoneme_enc = self.phoneme_enc(text)
+
+            # process pitch
+
+            if not exists(pitch):
+                assert exists(audio) and audio.ndim == 2
+                assert exists(self.target_sample_hz)
+
+                pitch = compute_pitch_pytorch(audio, self.target_sample_hz)
+                pitch = rearrange(pitch, 'b n -> b 1 n')
+
+            # process mel
+
+            if not exists(mel):
+                assert exists(audio) and audio.ndim == 2
+                mel = self.audio_to_mel(audio)
+                mel = mel[..., :pitch.shape[-1]]
+
+            mel_max_length = mel.shape[-1]
+
+            if not exists(mel_lens):
+                mel_lens = torch.full((batch,), mel_max_length, device = self.device, dtype = torch.long)
+
+            mel_mask = rearrange(create_mask(mel_lens, mel_max_length), 'b n -> b 1 n')
+
+            # alignment
+
+            aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
+            duration_pred, pitch_pred = self.duration_pitch(phoneme_enc, prompt_enc)
+
+            pitch = average_over_durations(pitch, aln_hard)
+            cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mas, 'b n c -> b 1 n c'), pitch)
+
+            # pitch and duration loss
+
+            duration_loss = F.l1_loss(aln_hard, duration_pred)
+
+            pitch = rearrange(pitch, 'b 1 d -> b d')
+            pitch_loss = F.l1_loss(pitch, pitch_pred)
+            align_loss = self.aligner_loss(aln_log , text_lens, mel_lens)
+            # weigh the losses
+
+            aux_loss = (duration_loss * self.duration_loss_weight)
+                    + (pitch_loss * self.pitch_loss_weight)
+                    + (align_loss * )
 
         # automatically encode raw audio to residual vq with codec
 
