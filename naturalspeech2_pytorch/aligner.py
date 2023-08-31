@@ -171,17 +171,18 @@ class Aligner(Module):
         y,
         y_mask
     ):
-        attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
         alignment_soft, alignment_logprob = self.aligner(y, rearrange(x, 'b d t -> b t d'), x_mask)
+
+        x_mask = rearrange(x_mask, '... i -> ... i 1')
+        y_mask = rearrange(y_mask, '... j -> ... 1 j')
+        attn_mask = x_mask * y_mask
+        attn_mask = rearrange(attn_mask, 'b 1 i j -> b i j')
+
         alignment_soft = rearrange(alignment_soft, 'b 1 c t -> b t c')
+        alignment_mask = maximum_path(alignment_soft, attn_mask)
 
-        alignment_mas = maximum_path(
-            alignment_soft.contiguous(),
-            rearrange(attn_mask, 'b 1 c t -> b c t').contiguous()
-        )
-
-        alignment_hard = torch.sum(alignment_mas, -1).int()
-        return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
+        alignment_hard = torch.sum(alignment_mask, -1).int()
+        return alignment_hard, alignment_soft, alignment_logprob, alignment_mask
     
 if __name__ == '__main__':
     batch_size = 10

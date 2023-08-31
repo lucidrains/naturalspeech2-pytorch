@@ -107,13 +107,8 @@ diffusion = NaturalSpeech2(
 raw_audio = torch.randn(4, 327680)
 prompt = torch.randn(4, 32768)               # they randomly excised a range on the audio for the prompt during training, eventually will take care of this auto-magically
 
-mel_lens = torch.tensor([120, 60 , 80, 70])
-mel = torch.randn((4, 80, 120))
-
 text = torch.randint(0, 100, (4, 100))
 text_lens = torch.tensor([100, 50 , 80, 120])
-
-pitch = torch.randn(4, 1, 120)
 
 # forwards and backwards
 
@@ -121,9 +116,6 @@ loss = diffusion(
     audio = raw_audio,
     text = text,
     text_lens = text_lens,
-    mel = mel,
-    mel_lens = mel_lens,
-    pitch = pitch,
     prompt = prompt
 )
 
@@ -134,9 +126,6 @@ loss.backward()
 generated_audio = diffusion.sample(
     length = 1024,
     text = text,
-    mel = mel,
-    mel_lens = mel_lens,
-    pitch = pitch,
     prompt = prompt
 ) # (1, 327680)
 ```
