@@ -1,10 +1,17 @@
 from typing import Tuple
+import numpy as np
+
 import torch
 from torch import nn
+from torch.nn import Module
 import torch.nn.functional as F
+
 from einops import rearrange
-import numpy as np
-class AlignerNet(torch.nn.Module):
+
+def exists(val):
+    return val is not None
+
+class AlignerNet(Module):
     """alignment model https://arxiv.org/pdf/2108.10447.pdf """
     def __init__(
         self,
@@ -56,25 +63,21 @@ class AlignerNet(torch.nn.Module):
         query_out = rearrange(query_out, 'b c t -> b t c')
         attn_logp = torch.cdist(query_out, key_out).unsqueeze(1)
 
-        if mask is not None:
+        if exists(mask):
             attn_logp.data.masked_fill_(~mask.bool().unsqueeze(2), -float("inf"))
 
         attn = self.softmax(attn_logp)
         return attn, attn_logp
 
-def pad_tensor(input, pad, mode='constant', value=0):
+def pad_tensor(input, pad, value=0):
     pad = [item for sublist in reversed(pad) for item in sublist]  # Flatten the tuple
     assert len(pad) // 2 == len(input.shape), 'Padding dimensions do not match input dimensions'
-    if mode == 'constant':
-        return torch.nn.functional.pad(input, pad, mode='constant', value=value)
-    else:
-        raise NotImplementedError('Only constant padding mode is implemented')
-
+    return F.pad(input, pad, mode='constant', value=value)
 
 def maximum_path(value, mask, const=None):
     device = value.device
     dtype = value.dtype
-    if const is None:
+    if not exists(const):
         const = torch.tensor(float('-inf')).to(device)  # Patch for Sphinx complaint
     value = value * mask
 
@@ -82,8 +85,9 @@ def maximum_path(value, mask, const=None):
     direction = torch.zeros(value.shape, dtype=torch.int64, device=device)
     v = torch.zeros((b, t_x), dtype=torch.float32, device=device)
     x_range = torch.arange(t_x, dtype=torch.float32, device=device).view(1, -1)
+
     for j in range(t_y):
-        v0 = pad_tensor(v, ((0, 0), (1, 0)), mode="constant", value=const)[:, :-1]
+        v0 = pad_tensor(v, ((0, 0), (1, 0)), value = const)[:, :-1]
         v1 = v
         max_mask = v1 >= v0
         v_max = torch.where(max_mask, v1, v0)
@@ -91,19 +95,20 @@ def maximum_path(value, mask, const=None):
 
         index_mask = x_range <= j
         v = torch.where(index_mask.view(1,-1), v_max + value[:, :, j], const)
+
     direction = torch.where(mask.bool(), direction, 1)
 
     path = torch.zeros(value.shape, dtype=torch.float32, device=device)
     index = mask[:, :, 0].sum(1).long() - 1
     index_range = torch.arange(b, device=device)
+
     for j in reversed(range(t_y)):
         path[index_range, index, j] = 1
         index = index + direction[index_range, index, j] - 1
+
     path = path * mask.float()
     path = path.to(dtype=dtype)
     return path
-
-
 
 class ForwardSumLoss():
     def __init__(self, blank_logprob=-1):
@@ -139,31 +144,48 @@ class ForwardSumLoss():
 
         return cost
 
-class Aligner(nn.Module):
-    def __init__(self, dim_in, dim_hidden, attn_channels=80 ,temperature=0.0005):
+class Aligner(Module):
+    def __init__(
+        self,
+        dim_in,
+        dim_hidden,
+        attn_channels=80,
+        temperature=0.0005
+    ):
         super().__init__()
         self.dim_in = dim_in
         self.dim_hidden = dim_hidden
         self.attn_channels = attn_channels
         self.temperature = temperature
-        self.aligner = AlignerNet(dim_in = self.dim_in, 
-                                  dim_hidden = self.dim_hidden,
-                                  attn_channels = self.attn_channels,
-                                  temperature = self.temperature)
-    def forward(self, x, x_mask, y, y_mask):
+        self.aligner = AlignerNet(
+            dim_in = self.dim_in, 
+            dim_hidden = self.dim_hidden,
+            attn_channels = self.attn_channels,
+            temperature = self.temperature
+        )
+
+    def forward(
+        self,
+        x,
+        x_mask,
+        y,
+        y_mask
+    ):
         attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
         alignment_soft, alignment_logprob = self.aligner(y, rearrange(x, 'b d t -> b t d'), x_mask)
         alignment_soft = rearrange(alignment_soft, 'b 1 c t -> b t c')
+
         alignment_mas = maximum_path(
             alignment_soft.contiguous(),
             rearrange(attn_mask, 'b 1 c t -> b c t').contiguous()
         )
+
         alignment_hard = torch.sum(alignment_mas, -1).int()
         return alignment_hard, alignment_soft, alignment_logprob, alignment_mas
     
 if __name__ == '__main__':
     batch_size = 10
-    seq_len_y = 200  # length of sequence y
+    seq_len_y = 200   # length of sequence y
     seq_len_x = 35
     feature_dim = 80  # feature dimension
 

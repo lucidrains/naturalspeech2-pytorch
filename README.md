@@ -221,3 +221,14 @@ trainer.train()
     volume   = {abs/2204.14198}
 }
 ```
+
+```bibtex
+@article{Badlani2021OneTA,
+    title   = {One TTS Alignment to Rule Them All},
+    author  = {Rohan Badlani and Adrian Lancucki and Kevin J. Shih and Rafael Valle and Wei Ping and Bryan Catanzaro},
+    journal = {ICASSP 2022 - 2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
+    year    = {2021},
+    pages   = {6092-6096},
+    url     = {https://api.semanticscholar.org/CorpusID:237277973}
+}
+```
