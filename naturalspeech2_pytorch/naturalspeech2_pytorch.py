@@ -1494,9 +1494,9 @@ class NaturalSpeech2(nn.Module):
             align_loss = self.aligner_loss(aln_log , text_lens, mel_lens)
             # weigh the losses
 
-            aux_loss = (duration_loss * self.duration_loss_weight)
-                    + (pitch_loss * self.pitch_loss_weight)
-                    + (align_loss * )
+            aux_loss = (duration_loss * self.duration_loss_weight) \
+                    + (pitch_loss * self.pitch_loss_weight) \
+                    + (align_loss * self.aligner_loss_weight)
 
         # automatically encode raw audio to residual vq with codec
 
