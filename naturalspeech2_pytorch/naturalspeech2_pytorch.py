@@ -1448,6 +1448,8 @@ class NaturalSpeech2(nn.Module):
             if not exists(text_lens):
                 text_lens = torch.full((batch,), text_max_length, device = self.device, dtype = torch.long)
 
+            text_lens.clamp_(max = text_max_length)
+
             text_mask = rearrange(create_mask(text_lens, text_max_length), 'b n -> b 1 n')
 
             prompt = self.process_prompt(prompt)
@@ -1474,6 +1476,8 @@ class NaturalSpeech2(nn.Module):
 
             if not exists(mel_lens):
                 mel_lens = torch.full((batch,), mel_max_length, device = self.device, dtype = torch.long)
+
+            mel_lens.clamp_(max = mel_max_length)
 
             mel_mask = rearrange(create_mask(mel_lens, mel_max_length), 'b n -> b 1 n')
 

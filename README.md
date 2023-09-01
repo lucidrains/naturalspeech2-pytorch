@@ -108,7 +108,7 @@ raw_audio = torch.randn(4, 327680)
 prompt = torch.randn(4, 32768)               # they randomly excised a range on the audio for the prompt during training, eventually will take care of this auto-magically
 
 text = torch.randint(0, 100, (4, 100))
-text_lens = torch.tensor([100, 50 , 80, 120])
+text_lens = torch.tensor([100, 50 , 80, 100])
 
 # forwards and backwards
 
