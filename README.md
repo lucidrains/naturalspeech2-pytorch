@@ -150,8 +150,9 @@ trainer.train()
 - [x] complete perceiver then cross attention conditioning on ddpm side
 - [x] add classifier free guidance, even if not in paper
 - [x] complete duration / pitch prediction during training - thanks to Manmay
+- [x] make sure pyworld way of computing pitch can also work
 
-- [ ] make sure pyworld way of computing pitch can also work
+- [ ] consult phd student in TTS field about pyworld usage
 - [ ] also offer direct summation conditioning using spear-tts text-to-semantic module, if available
 - [ ] add self-conditioning on ddpm side
 - [ ] take care of automatic slicing of audio for prompt, being aware of minimal audio segment as allowed by the codec model
