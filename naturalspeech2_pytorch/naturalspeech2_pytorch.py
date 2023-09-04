@@ -1649,7 +1649,7 @@ class Trainer(object):
         num_samples = 1,
         results_folder = './results',
         amp = False,
-        fp16 = False,
+        mixed_precision_type = 'fp16',
         use_ema = True,
         split_batches = True,
         dataloader = None,
@@ -1663,10 +1663,8 @@ class Trainer(object):
 
         self.accelerator = Accelerator(
             split_batches = split_batches,
-            mixed_precision = 'fp16' if fp16 else 'no'
+            mixed_precision = mixed_precision_type if amp else 'no'
         )
-
-        self.accelerator.native_amp = amp
 
         # model
 
