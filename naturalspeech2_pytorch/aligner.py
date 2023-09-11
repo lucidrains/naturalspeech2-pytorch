@@ -207,6 +207,7 @@ if __name__ == '__main__':
 
     x = torch.randn(batch_size, 512, seq_len_x)
     y = torch.randn(batch_size, seq_len_y, feature_dim)
+    y = y.transpose(1,2) #dim-1 is the channels for conv
     
     # Create masks
     x_mask = torch.ones(batch_size, 1, seq_len_x)
