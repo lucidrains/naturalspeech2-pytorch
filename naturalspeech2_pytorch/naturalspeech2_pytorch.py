@@ -1523,11 +1523,11 @@ class NaturalSpeech2(nn.Module):
 
             # alignment
 
-            aln_hard, aln_soft, aln_log, aln_mas = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
+            aln_hard, aln_soft, aln_log, aln_mask = self.aligner(phoneme_enc, text_mask, mel, mel_mask)
             duration_pred, pitch_pred = self.duration_pitch(phoneme_enc, prompt_enc)
 
             pitch = average_over_durations(pitch, aln_hard)
-            cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mas, 'b n c -> b 1 n c'), pitch)
+            cond = self.expand_encodings(rearrange(phoneme_enc, 'b n d -> b d n'), rearrange(aln_mask, 'b n c -> b 1 n c'), pitch)
 
             # pitch and duration loss
 
