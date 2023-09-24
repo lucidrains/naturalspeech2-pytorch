@@ -146,7 +146,8 @@ class ForwardSumLoss(Module):
 
         # Convert to log probabilities
         # Note: Mask out probs beyond key_len
-        attn_logprob.masked_fill_(torch.arange(max_key_len + 1, device=device, dtype=torch.long).view(1, 1, -1) > key_lens.view(1, -1, 1), -1e15)
+        mask_value = -torch.finfo(attn_logprob.dtype).max
+        attn_logprob.masked_fill_(torch.arange(max_key_len + 1, device=device, dtype=torch.long).view(1, 1, -1) > key_lens.view(1, -1, 1), mask_value)
 
         attn_logprob = attn_logprob.log_softmax(dim = -1)
 
@@ -158,6 +159,22 @@ class ForwardSumLoss(Module):
         cost = self.ctc_loss(attn_logprob, target_seqs, query_lens, key_lens)
 
         return cost
+
+class BinLoss(Module):
+    def forward(self, attn_hard, attn_logprob, key_lens):
+        batch, device = attn_logprob.shape[0], attn_logprob.device
+        max_key_len = attn_logprob.size(-1)
+
+        # Reorder input to [query_len, batch_size, key_len]
+        attn_logprob = rearrange(attn_logprob, 'b 1 c t -> c b t')
+        attn_hard = rearrange(attn_hard, 'b t c -> c b t')
+
+        mask_value = -torch.finfo(attn_logprob.dtype).max
+
+        attn_logprob.masked_fill_(torch.arange(max_key_len, device=device, dtype=torch.long).view(1, 1, -1) > key_lens.view(1, -1, 1), mask_value)
+        attn_logprob = attn_logprob.log_softmax(dim = -1)
+
+        return (attn_hard * attn_logprob).sum() / batch
 
 class Aligner(Module):
     def __init__(
